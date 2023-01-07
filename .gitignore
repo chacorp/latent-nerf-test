@@ -8,3 +8,7 @@
 data/*
 logs/*
 .idea
+
+experiments/
+src/token.txt
+.ipynb_checkpoints
