@@ -103,7 +103,7 @@ class StableDiffusion(nn.Module):
         return text_embeddings
 
 
-    def train_step(self, text_embeddings, inputs, guidance_scale=100, lap_loss=None):
+    def train_step(self, text_embeddings, inputs, guidance_scale=100):
         
         # interp to 512x512 to be fed into vae.
 
@@ -149,11 +149,10 @@ class StableDiffusion(nn.Module):
 
         # manually backward, since we omitted an item in grad and cannot simply autodiff.
         # _t = time.time()
-        # import pdb;pdb.set_trace()
         latents.backward(gradient=grad, retain_graph=True)
         # torch.cuda.synchronize(); print(f'[TIME] guiding: backward {time.time() - _t:.4f}s')
 
-        return lap_loss # dummy loss value
+        return 0 # dummy loss value
 
     def produce_latents(self, text_embeddings, height=512, width=512, num_inference_steps=50, guidance_scale=7.5, latents=None):
 
