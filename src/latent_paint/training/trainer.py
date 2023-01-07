@@ -130,7 +130,7 @@ class Trainer:
                     laplacian_min = self.cfg.optim.laplacian_min
                 else:
                     laplacian_weight = (laplacian_weight - laplacian_min) * 10**(-self.train_step*1e-06) + laplacian_min
-                prev_disp = self.mesh_model.displacement.clone()
+                # prev_disp = self.mesh_model.displacement.clone()
                 
                 self.train_step += 1
                 # pbar.set_description("loss: {:.04f}, disp:{:.04f}".format(loss.item(), self.mesh_model.displacement.max()))
@@ -141,18 +141,21 @@ class Trainer:
 
                 # pred_rgbs, loss = self.train_render(data)
                 pred_rgbs, lap_loss = self.train_render(data)
-                # import pdb;pdb.set_trace()
                 
-                ## Laplacian loss
-                lap_loss = lap_loss * laplacian_weight
-                lap_loss.backward()
+                # import pdb;pdb.set_trace()
+                reg_loss = self.mesh_model.displacement.norm(dim=1).mean()
+                
+                ## Laplacian loss + offset regularization
+                loss = (lap_loss * laplacian_weight) + reg_loss
+                loss.backward()
 
                 #loss = loss + lap_loss
 
                 self.optimizer.step()
-                new_disp = self.mesh_model.displacement - prev_disp
-                new_disp = torch.mean(new_disp)
-                pbar.set_description("disp:{:.06f}".format(new_disp))
+                # new_disp = self.mesh_model.displacement - prev_disp
+                new_disp = torch.mean(self.mesh_model.displacement)
+                vert_mean = torch.mean(self.mesh_model.mesh.vertices)
+                pbar.set_description("loss: {:.06f} vert: {:.06f} disp:{:.06f}".format(lap_loss.item(), vert_mean, new_disp))
                 # pbar.set_description("disp:{}".format(self.mesh_model.displacement[:3]))
 
                 if self.train_step % self.cfg.log.save_interval == 0:
