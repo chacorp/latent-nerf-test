@@ -1,0 +1,3 @@
+python -m scripts.train_latent_paint --log.exp_name yello_cube --guide.text "a yellow cube"  --guide.shape_path shapes/sphere.obj
+
+python -m scripts.train_latent_nerf --log.exp_name 'lego_man' --guide.text 'a lego man' --guide.shape_path shapes/teddy.obj --render.nerf_type latent
