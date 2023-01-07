@@ -118,8 +118,8 @@ class TexturedMeshModel(nn.Module):
     def get_params(self):
         if self.latent_mode:
             # return [self.background_sphere_colors, self.texture_img]
-            # return [self.background_sphere_colors, self.texture_img, self.displacement]
-            return [self.background_sphere_colors, self.displacement]
+            return [self.background_sphere_colors, self.texture_img, self.displacement]
+            # return [self.background_sphere_colors, self.displacement]
         else:
             # return [self.background_sphere_colors, self.texture_img_rgb_finetune]
             return [self.background_sphere_colors, self.texture_img_rgb_finetune, self.displacement]
@@ -211,7 +211,7 @@ class TexturedMeshModel(nn.Module):
                                                                        azim   = phi,
                                                                        radius = radius,
                                                                        look_at_height=self.dy,
-                                                                       disp   = self.displacement)
+                                                                       disp   = self.displacement*0)
 
         pred_back, _ = self.renderer.render_single_view(self.env_sphere,
                                                         background_sphere_colors,
@@ -235,6 +235,7 @@ class TexturedMeshModel(nn.Module):
         
         with torch.no_grad():
             L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
+        # lap_loss = L.mm(self.displacement + self.mesh.vertices)
         lap_loss = L.mm(self.displacement)
         lap_loss = lap_loss.norm(dim=1) * weights
         lap_loss = lap_loss.sum()
