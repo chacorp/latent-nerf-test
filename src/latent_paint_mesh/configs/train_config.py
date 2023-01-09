@@ -56,6 +56,14 @@ class OptimConfig:
     resume: bool = False
     # Load existing model
     ckpt: Optional[str] = None
+        
+    # Laplacian weight
+    # ref: https://github.com/NasirKhalid24/CLIP-Mesh/blob/d3cf57ebe5e619b48e34d6f0521a31b2707ddd72/configs/paper.yml
+    laplacian_weight: float = 100
+    laplacian_min: float = 0.6
+    # displacement optim
+    disp_lr: float = 1e-6
+    reg_weight: float = 2
 
 
 @dataclass
