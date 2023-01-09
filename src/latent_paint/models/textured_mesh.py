@@ -43,10 +43,6 @@ class TexturedMeshModel(nn.Module):
                                  interpolation_mode=self.opt.guide.texture_interpolation_mode)
         self.env_sphere, self.mesh = self.init_meshes()
         self.background_sphere_colors, self.texture_img, self.texture_img_rgb_finetune = self.init_paint()
-        
-        # vertices displacement
-        self.displacement = nn.Parameter(torch.zeros(self.mesh.vertices.shape, dtype=self.mesh.vertices.dtype, requires_grad=True).cuda())
-        
         self.vt, self.ft = self.init_texture_map()
 
         self.face_attributes = kal.ops.mesh.index_vertices_by_faces(
@@ -81,7 +77,7 @@ class TexturedMeshModel(nn.Module):
                                                             self.texture_resolution, self.texture_resolution).cuda())
 
         return background_sphere_colors, texture_img, texture_img_rgb_finetune
-    
+
     def init_texture_map(self):
         cache_path = self.opt.log.exp_dir
         vt_cache, ft_cache = cache_path / 'vt.pth', cache_path / 'ft.pth'
@@ -117,23 +113,19 @@ class TexturedMeshModel(nn.Module):
 
     def get_params(self):
         if self.latent_mode:
-            # return [self.background_sphere_colors, self.texture_img]
-            return [self.background_sphere_colors, self.texture_img, self.displacement]
-            # return [self.background_sphere_colors, self.displacement]
+            return [self.background_sphere_colors, self.texture_img]
         else:
-            # return [self.background_sphere_colors, self.texture_img_rgb_finetune]
-            return [self.background_sphere_colors, self.texture_img_rgb_finetune, self.displacement]
+            return [self.background_sphere_colors, self.texture_img_rgb_finetune]
 
     @torch.no_grad()
     def export_mesh(self, path, guidance=None):
-        # v, f = self.mesh.vertices, self.mesh.faces.int()
-        v, f = self.mesh.vertices+self.displacement, self.mesh.faces.int()
+        v, f = self.mesh.vertices, self.mesh.faces.int()
         h0, w0 = 256, 256
         ssaa, name = 1, ''
-                
+
         # v, f: torch Tensor
-        v_np = v.cpu().numpy() # [N, 3]
-        f_np = f.cpu().numpy() # [M, 3]
+        v_np = v.cpu().numpy()  # [N, 3]
+        f_np = f.cpu().numpy()  # [M, 3]
 
         if self.latent_mode:
             colors = guidance.decode_latents(self.texture_img).permute(0, 2, 3, 1).contiguous()
@@ -199,28 +191,24 @@ class TexturedMeshModel(nn.Module):
         else:
             texture_img = self.texture_img_rgb_finetune
             background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
-            
-        # add displacement
-        # new_vertices = self.mesh.vertices + self.displacement
-        # print(self.displacement)
+
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
                                                                        texture_img,
-                                                                       elev   = theta,
-                                                                       azim   = phi,
-                                                                       radius = radius,
-                                                                       look_at_height=self.dy,
-                                                                       disp   = self.displacement*0)
+                                                                       elev=theta,
+                                                                       azim=phi,
+                                                                       radius=radius,
+                                                                       look_at_height=self.dy)
 
         pred_back, _ = self.renderer.render_single_view(self.env_sphere,
                                                         background_sphere_colors,
-                                                        elev   = theta,
-                                                        azim   = phi,
-                                                        radius = radius,
+                                                        elev=theta,
+                                                        azim=phi,
+                                                        radius=radius,
                                                         look_at_height=self.dy)
-        # import pdb; pdb.set_trace()
-        # mask = mask.detach()
+
+        mask = mask.detach()
         pred_map = pred_back * (1 - mask) + pred_features * mask
 
         if self.latent_mode and mask.shape[-1] != 64:
@@ -228,20 +216,8 @@ class TexturedMeshModel(nn.Module):
             pred_back = F.interpolate(pred_back, (64, 64), mode='bicubic')
             pred_features = F.interpolate(pred_features, (64, 64), mode='bicubic')
             pred_map = F.interpolate(pred_map, (64, 64), mode='bicubic')
-            
-        ## laplacian smoothing
-        # ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
-        weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
-        
-        with torch.no_grad():
-            L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
-        # lap_loss = L.mm(self.displacement + self.mesh.vertices)
-        lap_loss = L.mm(self.displacement)
-        lap_loss = lap_loss.norm(dim=1) * weights
-        lap_loss = lap_loss.sum()
-        
-        return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features, 'lap_loss': lap_loss}
-        # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features}
+
+        return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features}
 
     def render_test(self, theta, phi, radius, decode_func=None, dims=None):
         if self.latent_mode:
@@ -250,8 +226,6 @@ class TexturedMeshModel(nn.Module):
         else:
             texture_img = self.texture_img_rgb_finetune
 
-        # add displacement
-        # new_vertices = self.mesh.vertices + self.displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
@@ -261,7 +235,6 @@ class TexturedMeshModel(nn.Module):
                                                                        radius=radius,
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
-                                                                       white_background=True,
-                                                                       disp=self.displacement)
+                                                                       white_background=True)
 
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask}
