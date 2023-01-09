@@ -30,19 +30,19 @@ class Trainer:
         utils.seed_everything(self.cfg.optim.seed)
 
         # Make dirs
-        self.exp_path           = make_path(self.cfg.log.exp_dir)
-        self.ckpt_path          = make_path(self.exp_path / 'checkpoints')
+        self.exp_path = make_path(self.cfg.log.exp_dir)
+        self.ckpt_path = make_path(self.exp_path / 'checkpoints')
         self.train_renders_path = make_path(self.exp_path / 'vis' / 'train')
-        self.eval_renders_path  = make_path(self.exp_path / 'vis' / 'eval')
+        self.eval_renders_path = make_path(self.exp_path / 'vis' / 'eval')
         self.final_renders_path = make_path(self.exp_path / 'results')
 
         self.init_logger()
         pyrallis.dump(self.cfg, (self.exp_path / 'config.yaml').open('w'))
 
-        self.mesh_model  = self.init_mesh_model()
-        self.diffusion   = self.init_diffusion()
-        self.text_z      = self.calc_text_embeddings()
-        self.optimizer   = self.init_optimizer()
+        self.mesh_model = self.init_mesh_model()
+        self.diffusion = self.init_diffusion()
+        self.text_z = self.calc_text_embeddings()
+        self.optimizer = self.init_optimizer()
         self.dataloaders = self.init_dataloaders()
 
         self.past_checkpoints = []
@@ -116,47 +116,19 @@ class Trainer:
         self.evaluate(self.dataloaders['val'], self.eval_renders_path)
         self.mesh_model.train()
 
-        # loss = torch.zeros((1,1))
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
                     bar_format='{desc}: {percentage:3.0f}% training step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
         while self.train_step < self.cfg.optim.iters:
             # Keep going over dataloader until finished the required number of iterations
             for data in self.dataloaders['train']:
-
-                # Laplace loss weighting
-                # ref: https://github.com/NasirKhalid24/CLIP-Mesh/blob/d3cf57ebe5e619b48e34d6f0521a31b2707ddd72/configs/paper.yml
-                if self.train_step == 0:
-                    laplacian_weight = self.cfg.optim.laplacian_weight
-                    laplacian_min = self.cfg.optim.laplacian_min
-                else:
-                    laplacian_weight = (laplacian_weight - laplacian_min) * 10**(-self.train_step*1e-06) + laplacian_min
-                # prev_disp = self.mesh_model.displacement.clone()
-                
                 self.train_step += 1
-                # pbar.set_description("loss: {:.04f}, disp:{:.04f}".format(loss.item(), self.mesh_model.displacement.max()))
                 pbar.update(1)
 
                 self.optimizer.zero_grad()
 
-
-                # pred_rgbs, loss = self.train_render(data)
-                pred_rgbs, lap_loss = self.train_render(data)
-                
-                # import pdb;pdb.set_trace()
-                reg_loss = self.mesh_model.displacement.norm(dim=1).mean()
-                
-                ## Laplacian loss + offset regularization
-                loss = (lap_loss * laplacian_weight) + reg_loss
-                loss.backward()
-
-                #loss = loss + lap_loss
+                pred_rgbs, loss = self.train_render(data)
 
                 self.optimizer.step()
-                # new_disp = self.mesh_model.displacement - prev_disp
-                new_disp = torch.mean(self.mesh_model.displacement)
-                vert_mean = torch.mean(self.mesh_model.mesh.vertices)
-                pbar.set_description("loss: {:.06f} vert: {:.06f} disp:{:.06f}".format(lap_loss.item(), vert_mean, new_disp))
-                # pbar.set_description("disp:{}".format(self.mesh_model.displacement[:3]))
 
                 if self.train_step % self.cfg.log.save_interval == 0:
                     self.save_checkpoint(full=True)
@@ -222,10 +194,7 @@ class Trainer:
 
         outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
         pred_rgb = outputs['image']
-        lap_loss = outputs['lap_loss']
-        # pred_back = outputs['background']
-        # print('{}'.format(pred_back[0,0,0]))
-        
+
         # text embeddings
         if self.cfg.guide.append_direction:
             dirs = data['dir']  # [B,]
@@ -234,10 +203,10 @@ class Trainer:
             text_z = self.text_z
 
         # Guidance loss
-        loss_guidance = self.diffusion.train_step(text_z, pred_rgb, lap_loss)
-        # loss = loss_guidance # dummy
+        loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
+        loss = loss_guidance
 
-        return pred_rgb, lap_loss
+        return pred_rgb, loss
 
     def eval_render(self, data):
         theta = data['theta']
