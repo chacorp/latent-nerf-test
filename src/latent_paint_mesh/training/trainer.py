@@ -15,8 +15,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from src import utils
-from src.latent_paint.configs.train_config import TrainConfig
-from src.latent_paint.training.views_dataset import ViewsDataset
+from src.latent_paint_mesh.configs.train_config import TrainConfig
+from src.latent_paint_mesh.training.views_dataset import ViewsDataset
 from src.stable_diffusion import StableDiffusion
 from src.utils import make_path, tensor2numpy
 
@@ -127,6 +127,7 @@ class Trainer:
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
                     bar_format='{desc}: {percentage:3.0f}% training step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
         step_weight = 0
+        prev_optim_step = 0
         while self.train_step < self.cfg.optim.iters:
             
             # Keep going over dataloader until finished the required number of iterations
@@ -134,11 +135,11 @@ class Trainer:
                 
                 ## Laplace loss weighting
                 ## ref: https://github.com/NasirKhalid24/CLIP-Mesh/blob/d3cf57ebe5e619b48e34d6f0521a31b2707ddd72/configs/paper.yml
-                if self.train_step == 0:
-                    laplacian_weight = self.cfg.optim.laplacian_weight
-                    laplacian_min = self.cfg.optim.laplacian_min
-                else:
-                    laplacian_weight = (laplacian_weight - laplacian_min) * 10.**(-self.train_step*1e-06) + laplacian_min
+                # if self.train_step == 0:
+                #     laplacian_weight = self.cfg.optim.laplacian_weight
+                #     laplacian_min = self.cfg.optim.laplacian_min
+                # else:
+                #     laplacian_weight = (laplacian_weight - laplacian_min) * 10.**(-self.train_step*1e-06) + laplacian_min
                 
                 self.train_step += 1
                 pbar.update(1)
@@ -151,9 +152,32 @@ class Trainer:
                 pred_rgbs, lap_loss, loss_guidance = self.train_render(data)
                 # sds_grad = self.mesh_model.displacement.grad
                 
+                self.optimizer.step()
+                
                 # import pdb;pdb.set_trace()
+                optim_step = int(50 * 10.**(-self.train_step*5e-05)+1)
+                # if self.train_step % optim_step == 0:
+                                
+                # ========= use optim_step =========
+                # next_optim_step = optim_step + prev_optim_step
+                # if self.train_step >= next_optim_step:
+                #     prev_optim_step = next_optim_step
+                #     lap_loss =  10. ** 4 * lap_loss #/ (1 + step_weight)
 
-                lap_loss = (lap_loss * laplacian_weight)
+                #     ## Offset regularization
+                #     # reg_loss = self.mesh_model.displacement.norm(dim=1).mean()
+                #     reg_loss = torch.mean(torch.mean(self.mesh_model.displacement[None]**2, axis=1), axis=1)
+                #     reg_loss = 10. ** self.cfg.optim.reg_weight * reg_loss # / (1 + (step_weight))
+                    
+                #     loss = lap_loss + reg_loss
+                #     loss.backward()
+                #     ## optimize displacement interval
+                #     self.optimizer_disp.step()
+                
+                
+                # lap_loss = (lap_loss * laplacian_weight)
+                # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L30
+                lap_loss =  10. ** 4 * lap_loss #/ (1 + step_weight)
 
                 ## Offset regularization
                 ## ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L31
@@ -163,17 +187,23 @@ class Trainer:
                 
                 loss = lap_loss + reg_loss
                 loss.backward()
-                # self.mesh_model.displacement.grad += sds_grad
-                
-                self.optimizer.step()
+                ## optimize displacement interval
                 self.optimizer_disp.step()
                 
                 # new_disp = self.mesh_model.displacement - prev_disp
                 new_disp = torch.mean(self.mesh_model.displacement)
                 # vert_mean = torch.mean(self.mesh_model.mesh.vertices)
                 # pbar.set_description("loss: {:.06f} vert: {:.06f} disp:{:.06f}".format(loss.item(), vert_mean, new_disp))
-                pbar.set_description("loss: {:06f} reg:{:06f} disp:{:06f}".format(
-                    lap_loss.item(), reg_loss.item(), new_disp))
+                descrition = ""
+                
+                descrition += "disp:{:06f}".format(new_disp)
+                descrition += " lap: {:06f} reg:{:06f}".format(lap_loss.item(), reg_loss.item())
+                # ========= use optim_step =========
+                # descrition += "disp:{:06f} disp_step:{}".format(new_disp, next_optim_step)
+                # if self.train_step % optim_step == 0:
+                #     descrition += " lap: {:06f} reg:{:06f}".format(lap_loss.item(), reg_loss.item())
+                
+                pbar.set_description(descrition)
                 # pbar.set_description("disp:{}".format(self.mesh_model.displacement[0]))
 
                 if self.train_step % self.cfg.log.save_interval == 0:
@@ -260,10 +290,10 @@ class Trainer:
         return pred_rgb, lap_loss, loss_guidance
 
     def eval_render(self, data):
-        theta = data['theta']
-        phi = data['phi']
-        radius = data['radius']
-        dim = self.cfg.render.eval_grid_size
+        theta   = data['theta']
+        phi     = data['phi']
+        radius  = data['radius']
+        dim     = self.cfg.render.eval_grid_size
         outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, decode_func=self.diffusion.decode_latents,
                                          test=True ,dims=(dim,dim))
         pred_rgb = outputs['image'].permute(0, 2, 3, 1).contiguous().clamp(0, 1)

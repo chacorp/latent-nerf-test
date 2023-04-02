@@ -117,8 +117,8 @@ class TexturedMeshModel(nn.Module):
 
     def get_params(self):
         if self.latent_mode:
-            # return [self.background_sphere_colors, self.texture_img]
-            return [self.background_sphere_colors, self.texture_img, self.displacement]
+            return [self.background_sphere_colors, self.texture_img]
+            # return [self.background_sphere_colors, self.texture_img, self.displacement]
             # return [self.background_sphere_colors, self.displacement]
         else:
             return [self.background_sphere_colors, self.texture_img_rgb_finetune]

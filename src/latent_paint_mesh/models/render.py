@@ -5,7 +5,12 @@ import numpy as np
 class Renderer:
     # from https://github.com/threedle/text2mesh
 
-    def __init__(self, device, dim=(224, 224), interpolation_mode='nearest'):
+    def __init__(self, 
+                 device, 
+                 dim=(224, 224), 
+                 interpolation_mode='nearest',
+                 lights=torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                 ):
         assert interpolation_mode in ['nearest', 'bilinear', 'bicubic'], f'no interpolation mode {interpolation_mode}'
 
         camera = kal.render.camera.generate_perspective_projection(np.pi / 3).to(device)
@@ -15,6 +20,10 @@ class Renderer:
         self.camera_projection = camera
         self.dim = dim
         self.background = torch.ones(dim).to(device).float()
+        
+        ### Light
+        ### ref: https://github.com/threedle/text2mesh/blob/37d1c8491104b78ee55cd54cd09ab24cb1427714/render.py#L20
+        self.lights = lights.unsqueeze(0).to(device)
 
     @staticmethod
     def get_camera_from_view(elev, azim, r=3.0, look_at_height=0.0):
@@ -94,11 +103,25 @@ class Renderer:
             dims[1], dims[0], face_vertices_camera[:, :, :, -1],
             face_vertices_image, face_attributes, face_normals[:, :, -1],
             rast_backend='cuda')
-        
+            
         # image_features is a tuple in composed of the interpolated attributes of face_attributes
         texture_coords, mask = image_features
         image = kal.render.mesh.texture_mapping(texture_coords, texture_map.repeat(1, 1, 1, 1), mode='bilinear')
-        image = torch.clamp(image * mask, 0., 1.)
+        image = image * mask
+        image = torch.clamp(image, 0.0, 1.0)
+        
+        ## Lighting
+        # https://github.com/threedle/text2mesh/blob/37d1c8491104b78ee55cd54cd09ab24cb1427714/render.py#L278
+        # if lighting:
+        if False:
+            image_normals = face_normals[:, face_idx].squeeze(0)
+            image_lighting = kal.render.mesh.spherical_harmonic_lighting(image_normals, self.lights).unsqueeze(0)
+            # import pdb;pdb.set_trace()
+            C = image.shape[-1]
+            image_lighting = image_lighting.repeat(1, C, 1, 1).permute(0, 2, 3, 1).to(self.device)
+            # print(image.shape, image_lighting.shape)
+            image = image * image_lighting
+            image = torch.clamp(image, 0.0, 1.0)
 
         if white_background:
             image += 1 * (1 - mask)

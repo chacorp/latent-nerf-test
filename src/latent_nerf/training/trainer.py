@@ -29,21 +29,21 @@ class Trainer:
         utils.seed_everything(self.cfg.optim.seed)
 
         # Make dirs
-        self.exp_path = make_path(self.cfg.log.exp_dir)
-        self.ckpt_path = make_path(self.exp_path / 'checkpoints')
+        self.exp_path           = make_path(self.cfg.log.exp_dir)
+        self.ckpt_path          = make_path(self.exp_path / 'checkpoints')
         self.train_renders_path = make_path(self.exp_path / 'vis' / 'train')
-        self.eval_renders_path = make_path(self.exp_path / 'vis' / 'eval')
+        self.eval_renders_path  = make_path(self.exp_path / 'vis' / 'eval')
         self.final_renders_path = make_path(self.exp_path / 'results')
 
         self.init_logger()
         pyrallis.dump(self.cfg, (self.exp_path / 'config.yaml').open('w'))
 
-        self.nerf = self.init_nerf()
-        self.diffusion = self.init_diffusion()
-        self.text_z = self.calc_text_embeddings()
-        self.losses = self.init_losses()
+        self.nerf               = self.init_nerf()
+        self.diffusion          = self.init_diffusion()
+        self.text_z             = self.calc_text_embeddings()
+        self.losses             = self.init_losses()
+        self.dataloaders        = self.init_dataloaders()
         self.optimizer, self.scaler = self.init_optimizer()
-        self.dataloaders = self.init_dataloaders()
 
         self.past_checkpoints = []
         if self.cfg.optim.resume:

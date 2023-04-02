@@ -128,7 +128,7 @@ class StableDiffusion(nn.Module):
         # _t = time.time()
         with torch.no_grad():
             # add noise
-            noise = torch.randn_like(latents)
+            noise = torch.randn_like(latents) # (64 x 64 x 4)
             latents_noisy = self.scheduler.add_noise(latents, noise, t)
             # pred noise
             latent_model_input = torch.cat([latents_noisy] * 2)
