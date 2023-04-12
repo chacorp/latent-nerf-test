@@ -186,11 +186,14 @@ class TexturedMeshModel(nn.Module):
             fp.write(f'Ns 0.000000 \n')
             fp.write(f'map_Kd {name}albedo.png \n')
 
-    def render(self, theta, phi, radius, decode_func=None, test=False, dims=None):
+    def render(self, theta, phi, radius, decode_func=None, test=False, dims=None, ref_view=False):
         if test:
             return self.render_test(theta, phi, radius, decode_func, dims=dims)
         else:
-            return self.render_train(theta, phi, radius)
+            if ref_view:
+                return self.render_train_ref_view(theta, phi, radius, decode_func, dims=dims)
+            else:
+                return self.render_train(theta, phi, radius)
 
     def render_train(self, theta, phi, radius):
         if self.latent_mode:
@@ -217,10 +220,12 @@ class TexturedMeshModel(nn.Module):
                                                         azim           = phi,
                                                         radius         = radius,
                                                         look_at_height = self.dy)
-        # import pdb; pdb.set_trace()
         mask = mask.detach()
         pred_map = pred_back * (1 - mask) + pred_features * mask
-
+        # import pdb; pdb.set_trace()
+        # from torchvision.transforms import ToPILImage
+        # ToPILImage()(pred_features[0]).save('tm.png')
+        
         if self.latent_mode and mask.shape[-1] != 64:
             mask          = F.interpolate(mask, (64, 64), mode='bicubic')
             pred_back     = F.interpolate(pred_back, (64, 64), mode='bicubic')
@@ -264,3 +269,37 @@ class TexturedMeshModel(nn.Module):
                                                                        disp=self.displacement)
 
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask}
+    
+    def render_train_ref_view(self, theta, phi, radius, decode_func=None, dims=None):
+        if self.latent_mode:
+            assert decode_func is not None, 'decode function was not supplied to decode the latent texture image'
+            texture_img = decode_func(self.texture_img)
+        else:
+            texture_img = self.texture_img_rgb_finetune
+        # import pdb;pdb.set_trace()
+        # pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,self.mesh.faces,self.face_attributes,texture_img,elev=theta,azim=phi,radius=radius,look_at_height=self.dy,dims=dims,white_background=True,disp=self.displacement)
+        # add displacement
+        pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
+                                                                       self.mesh.faces,
+                                                                       self.face_attributes,
+                                                                       texture_img,
+                                                                       elev=theta,
+                                                                       azim=phi,
+                                                                       radius=radius,
+                                                                       look_at_height=self.dy,
+                                                                       dims=dims,
+                                                                       white_background=True,
+                                                                       disp=self.displacement)
+        ## laplacian smoothing
+        ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
+        weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
+        
+        with torch.no_grad():
+            # kal.metrics.mesh.laplacian_loss()
+            L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
+        # lap_loss = L.mm(self.displacement + self.mesh.vertices)
+        lap_loss = L.mm(self.displacement)
+        lap_loss = lap_loss.norm(dim=1) * weights
+        lap_loss = lap_loss.sum()
+        
+        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
