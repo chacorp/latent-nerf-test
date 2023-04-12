@@ -36,6 +36,8 @@ def get_view_direction(thetas, phis, overhead, front):
 
 def tensor2numpy(tensor:torch.Tensor) -> np.ndarray:
     tensor = tensor.detach().cpu().numpy()
+    if tensor.min() < 0:
+        tensor = (tensor * 0.5) + 0.5
     tensor = (tensor * 255).astype(np.uint8)
     return tensor
 
