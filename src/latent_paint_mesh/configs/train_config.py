@@ -25,6 +25,7 @@ class GuideConfig:
     """ Parameters defining the guidance """
     # Guiding text prompt
     text: str
+    image: str
     # The mesh to paint
     shape_path: str
     # Append direction to text prompts
@@ -32,7 +33,9 @@ class GuideConfig:
     # A Textual-Inversion concept to use
     concept_name: Optional[str] = None
     # A huggingface diffusion model to use
-    diffusion_name: str = 'CompVis/stable-diffusion-v1-4'
+    # diffusion_name: str = 'CompVis/stable-diffusion-v1-4'
+    # diffusion_name: str = 'runwayml/stable-diffusion-v1-5'
+    diffusion_name: str = '/source/kseo/hugging_cache/models--runwayml--stable-diffusion-v1-5/snapshots/39593d5650112b4cc580433f6b0435385882d819/'
     # Scale of mesh in 1x1x1 cube
     shape_scale: float = 0.6
     # height of mesh
@@ -49,9 +52,8 @@ class OptimConfig:
     # Seed for experiment
     seed: int = 0
     # Total iters
+    # iters: int = 2000
     iters: int = 5000
-    # Learning rate
-    lr: float = 1e-2
     # Resume from checkpoint
     resume: bool = False
     # Load existing model
@@ -62,10 +64,12 @@ class OptimConfig:
     laplacian_weight: float = 100
     laplacian_min: float = 0.6
     
+    ## Texture Learning rate
+    lr: float = 2e-2
     ## Displacement
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
     # disp_lr: float = 5e-3
-    disp_lr: float = 2e-3
+    disp_lr: float = 1e-4
     lap_weight: float = 5.
     reg_weight: float = 2.
 
@@ -78,7 +82,7 @@ class LogConfig:
     # Experiment output dir
     exp_root: Path = Path('experiments/')
     # How many steps between save step
-    save_interval: int = 100
+    save_interval: int = 500
     # Run only test
     eval_only: bool = False
     # Number of angles to sample for eval during training
