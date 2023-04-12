@@ -39,7 +39,6 @@ def circle_poses(device, radius=1.25, theta=60.0, phi=0.0, angle_overhead=30.0, 
 
     return dirs, thetas.item(), phis.item(), radius
 
-
 class ViewsDataset:
     def __init__(self, cfg: RenderConfig, device, type='train', size=100):
         super().__init__()
