@@ -63,13 +63,16 @@ class Renderer:
         ## pdb; pdb.set_trace() find grad !!
         # if white_background == False:
         #     import pdb;pdb.set_trace()
-        
         ### Add displacement
         if disp != None:
             verts = verts + disp
         
-        camera_transform = self.get_camera_from_view(torch.tensor(elev), torch.tensor(azim), r=radius,
-                                                look_at_height=look_at_height).to(self.device)
+        camera_transform = self.get_camera_from_view(
+                torch.tensor(elev), 
+                torch.tensor(azim), 
+                r=radius,
+                look_at_height=look_at_height
+            ).to(self.device)
         
         face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
             verts.to(self.device), faces.to(self.device), self.camera_projection, camera_transform=camera_transform)
@@ -107,8 +110,14 @@ class Renderer:
         # image_features is a tuple in composed of the interpolated attributes of face_attributes
         texture_coords, mask = image_features
         image = kal.render.mesh.texture_mapping(texture_coords, texture_map.repeat(1, 1, 1, 1), mode='bilinear')
+        
+        # if white_background == False:
+        #     import pdb; pdb.set_trace()
+        #     from torchvision.transforms import ToPILImage
+        #     ToPILImage()(image.permute(0, 3, 1, 2)[0]).save('tm.png')
+        #     ToPILImage()(mask.permute(0, 3, 1, 2)[0]).save('tm.png')
+        #     ToPILImage()((image * mask).permute(0, 3, 1, 2)[0]).save('tm.png')
         image = image * mask
-        image = torch.clamp(image, 0.0, 1.0)
         
         ## Lighting
         # https://github.com/threedle/text2mesh/blob/37d1c8491104b78ee55cd54cd09ab24cb1427714/render.py#L278
@@ -121,7 +130,7 @@ class Renderer:
             image_lighting = image_lighting.repeat(1, C, 1, 1).permute(0, 2, 3, 1).to(self.device)
             # print(image.shape, image_lighting.shape)
             image = image * image_lighting
-            image = torch.clamp(image, 0.0, 1.0)
+            # image = torch.clamp(image, 0.0, 1.0) ## this is latent feature do not need cliping
 
         if white_background:
             image += 1 * (1 - mask)
