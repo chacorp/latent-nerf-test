@@ -137,6 +137,7 @@ class TexturedMeshModel(nn.Module):
 
         if self.latent_mode:
             colors = guidance.decode_latents(self.texture_img).permute(0, 2, 3, 1).contiguous()
+            colors = guidance.diffusion.denorm_img(colors)
         else:
             colors = self.texture_img_rgb_finetune.permute(0, 2, 3, 1).contiguous()
 
@@ -274,8 +275,10 @@ class TexturedMeshModel(nn.Module):
         if self.latent_mode:
             assert decode_func is not None, 'decode function was not supplied to decode the latent texture image'
             texture_img = decode_func(self.texture_img)
+            background_sphere_colors = self.background_sphere_colors
         else:
             texture_img = self.texture_img_rgb_finetune
+            background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
         # import pdb;pdb.set_trace()
         # pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,self.mesh.faces,self.face_attributes,texture_img,elev=theta,azim=phi,radius=radius,look_at_height=self.dy,dims=dims,white_background=True,disp=self.displacement)
         # add displacement
@@ -288,8 +291,17 @@ class TexturedMeshModel(nn.Module):
                                                                        radius=radius,
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
-                                                                       white_background=True,
                                                                        disp=self.displacement)
+        # pred_back, _ = self.renderer.render_single_view(self.env_sphere,
+        #                                                 background_sphere_colors,
+        #                                                 elev           = theta,
+        #                                                 azim           = phi,
+        #                                                 radius         = radius,
+        #                                                 look_at_height = self.dy,
+        #                                                 dims           = dims,)
+        # mask = mask.detach()
+        # pred_map = pred_back * (1 - mask) + pred_features * mask
+        
         ## laplacian smoothing
         ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
         weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
@@ -303,3 +315,4 @@ class TexturedMeshModel(nn.Module):
         lap_loss = lap_loss.sum()
         
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
+        # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
