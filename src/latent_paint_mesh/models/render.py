@@ -40,8 +40,9 @@ class Renderer:
         return camera_proj
 
 
-    def render_single_view(self, mesh, face_attributes, elev=0, azim=0, radius=2, look_at_height=0.0):
-        dims = self.dim
+    def render_single_view(self, mesh, face_attributes, elev=0, azim=0, radius=2, look_at_height=0.0, dims=None):
+        # dims = self.dim
+        dims = self.dim if dims is None else dims
 
         camera_transform = self.get_camera_from_view(torch.tensor(elev), torch.tensor(azim), r=radius,
                                                 look_at_height=look_at_height).to(self.device)
