@@ -21,7 +21,6 @@ from torchvision import transforms
 MODEL_NAME = 'Fantasy-Studio/Paint-by-Example'
 CACHE_DIR = "/source/skg/diffusion-project/hugging_cache"
 
-
 class PaintbyExample(nn.Module):
     def __init__(self, device, \
         model_name=MODEL_NAME,\
@@ -49,10 +48,11 @@ class PaintbyExample(nn.Module):
 
         # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
         logger.info(f'loading clip image encoder...')
-        # self.image_encoder = CLIPVisionModel.from_pretrained(model_name, subfolder="image_encoder", cache_dir=cache_dir).to(self.device)
         self.image_encoder = PaintByExampleImageEncoder.from_pretrained(model_name, subfolder="image_encoder", cache_dir=cache_dir).to(self.device)
         
         self.model_id = "openai/clip-vit-base-patch32"
+        # self.image_processor = AutoProcessor.from_pretrained(self.model_id)
+        # self.CLIP_image_encoder = CLIPVisionModel.from_pretrained(model_name, subfolder="image_encoder", cache_dir=cache_dir).to(self.device)
         # loading text processor
         self.tokenizer = CLIPTokenizer.from_pretrained(self.model_id)
         self.text_encoder = CLIPTextModel.from_pretrained(self.model_id).to(self.device)
@@ -206,6 +206,15 @@ class PaintbyExample(nn.Module):
         # imgs = (imgs / 2 + 0.5).clamp(0, 1)
         return imgs
 
+    def decode_latents_with_grad(self, latents):
+        # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
+        latents = 1 / 0.18215 * latents
+
+        imgs = self.vae.decode(latents).sample
+
+        # imgs = (imgs / 2 + 0.5).clamp(0, 1)
+        return imgs
+
     def encode_imgs(self, imgs):
         # imgs: [B, 3, H, W]
         # imgs = 2 * imgs - 1
@@ -314,6 +323,99 @@ class PaintbyExample(nn.Module):
         timesteps = self.scheduler.timesteps[t_start:]
         return timesteps, num_inference_steps - t_start
     
+    def approx_latent2rgb(self, example_images):
+        import numpy as np
+        from tqdm import tqdm
+        rs_example_images = example_images.resize((512,512))
+        np_example_images = np.array(rs_example_images).transpose(2,0,1)
+        th_example_images = torch.tensor(np_example_images)[None] / 255.
+        th_example_images = th_example_images.to(self.device)
+        latents_example_images = self.encode_imgs(th_example_images) # torch.Size([1, 4, 64, 64])
+        const = 1 / 0.18215 
+        latents_example_images = latents_example_images[0] # torch.Size([4, 64, 64])
+        # homogeneous coordinate
+        
+        down_example_images = transforms.ToTensor()(example_images.resize((64,64))) # torch.Size([1, 3, 64, 64])
+        down_example_images = down_example_images.to(self.device) ### 0 ~ 1 range
+        # down_example_images = (down_example_images * 2.0) - 1.0  ### -1 ~ 1 range
+        
+        
+        latents_example_images = torch.cat([latents_example_images, torch.ones(1,64,64).to(self.device)])
+        
+        # new_mat = torch.tensor([[ 0.2135,  0.1282,  0.1321],[ 0.0707,  0.2170,  0.1689],[-0.1449,  0.1692,  0.1697],[-0.1179, -0.2380, -0.2821]], device='cuda:0', requires_grad=True)
+        # new_mat = torch.tensor([[ 0.2117,  0.1266,  0.1307],[ 0.0700,  0.2151,  0.1670],[-0.1429,  0.1672,  0.1677],[-0.1161, -0.2360, -0.2801]], device='cuda:0', requires_grad=True)
+        new_mat = torch.tensor([[ 0.2135,  0.1282,  0.1321],[ 0.0707,  0.2170,  0.1689],[-0.1449,  0.1692,  0.1697],[-0.1179, -0.2380, -0.2821],[ 0.2555,  0.0639,  0.0823]], device='cuda:0', requires_grad=True)
+        
+        def svae_image(decode_latents, norm=True):
+            if norm:
+                vis = torch.cat([(decode_latents*0.5) + 0.5, (down_example_images*0.5)+0.5], dim = -1)
+            else:
+                vis = torch.cat([decode_latents, down_example_images], dim = -1)
+            transforms.ToPILImage()(vis).save('tt.png')
+            
+        def optimize_new_mat(new_mat, latent, lr=1e-3, L=1, nl=0, max_itr=2000):
+            criterionL1 = nn.L1Loss()
+            optimizer = torch.optim.Adam([new_mat], lr=lr, betas=(0.9, 0.999))
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+            
+            itr = 0
+            pbar = tqdm(total=max_itr, initial=itr)
+            print('optimize')
+            while itr < max_itr:
+                itr += 1
+                pbar.update(1)
+                optimizer.zero_grad()
+                decode_latents = torch.einsum('bj,bik->jik', new_mat, latent)
+                if L==1:
+                    loss = criterionL1(decode_latents, down_example_images.detach())
+                elif L==2:
+                    loss = F.mse_loss(decode_latents, down_example_images.detach())
+                else:
+                    loss = F.mse_loss(decode_latents, down_example_images.detach()) + criterionL1(decode_latents, down_example_images.detach())
+                if nl:
+                    loss += new_mat.norm()
+                loss.backward()
+                optimizer.step()
+                pbar.set_description("loss: {:06f} ".format(loss.item()))
+                scheduler.step()
+        
+            svae_image(decode_latents, 0)
+            return new_mat
+        
+        
+        # import pdb; pdb.set_trace()
+        # R = torch.linalg.lstsq(latents_example_images.reshape(-1,4), down_example_images[0].reshape(-1,1)).solution
+        
+        # # X = torch.linalg.pinv(latents_example_images) @ down_example_images
+        # pinv_l = torch.linalg.pinv(latents_example_images)
+        # X = torch.einsum('jbk,ibk->ji', pinv_l, down_example_images)
+        # image = torch.einsum('bj,bik->jik', X, latents_example_images)
+        # svae_image(torch.einsum('bj,bik->jik', X, latents_example_images), 0)
+
+        # R_img = torch.einsum('bj,bik->jik', R, latents_example_images)
+        # vis = torch.cat([(R_img*0.5) + 0.5, (down_example_images[2][None]*0.5)+0.5], dim = -1)
+        # transforms.ToPILImage()(vis).save('tt.png')
+        # svae_image(torch.einsum('bj,bik->jik', R, latents_example_images), 0)
+        
+        new_mat = optimize_new_mat(new_mat, latents_example_images, lr=1e-4, L=3, nl=1, max_itr=1000)
+        # svae_image(torch.einsum('bj,bik->jik', new_mat-n_linear, latents_example_images), 0)
+        # svae_image(torch.einsum('bj,bik->jik', optimize_new_mat(new_mat, lr=1e-4, L=2, max_itr=2000), latents_example_images), 0)
+        
+        # _linear = torch.cat([self.linear_rgb_estimator, torch.ones(1,3).cuda()]).requires_grad_(True)
+        # n_linear = optimize_new_mat(_linear, lr=1e-3, L=3, nl=1, max_itr=10000)
+        # scale = torch.tensor([[1],[1.2],[1],[0.5],[-.5]]).cuda()
+        # optimize_new_mat(_linear, lr=1e-2, L=1, max_itr=10000)
+        # new_mat = optimize_new_mat(torch.rand(5,3).cuda().requires_grad_(True), lr=1e-4, L=2, max_itr=10000)
+        # new_mat = optimize_new_mat(new_linear, lr=1e-4, L=2, max_itr=10000)
+        # new_mat = optimize_new_mat(new_mat, lr=1e-4, L=2)
+        # new_mat = optimize_new_mat(new_mat, lr=1e-5)
+        import pdb;pdb.set_trace()
+        # new_linear = torch.tensor([[ 0.2960,  0.2050,  0.2060],[ 0.1850,  0.2840,  0.1710],[-0.1560,  0.1910,  0.2660],[-0.1820, -0.2690, -0.4710],[ 0.1753,  0.7383,  0.6385]], device='cuda:0', requires_grad=True)
+        # svae_image(torch.einsum('bj,bik->jik', new_mat, latents_example_images))
+        # svae_image(torch.einsum('bj,bik->jik', new_linear, latents_example_images))
+        # svae_image(torch.einsum('bj,bik->jik', new_mat*.6+_linear*0.2, latents_example_images))
+        return
+    
     def train_step(self, 
                    inputs,              # latent
                    input_masks,         # latent mask
@@ -336,16 +438,11 @@ class PaintbyExample(nn.Module):
         
         masks      = 1 - input_masks
         grey_masks = torch.cat([input_masks] * 4, dim=1) * self.latent_grey
-        latents_masked_images =  inputs * masks # + grey_masks
-        ## check 'latents_masked_images' image
-        
-        # import pdb;pdb.set_trace()
-        # import numpy as np
-        # rs_example_images = example_images.resize((512,512))
-        # np_example_images = np.array(rs_example_images).transpose(2,0,1)
-        # th_example_images = torch.tensor(np_example_images)[None] / 255.
-        # th_example_images = th_example_images.to(self.device)
-        # latents_example_images = self.encode_imgs(th_example_images) # torch.Size([1, 4, 64, 64])
+        latents_masked_images =  inputs * masks + grey_masks
+
+        # #### test!!!
+        # self.approx_latent2rgb(example_images)
+            
         # # transforms.ToPILImage()(latents_example_images[0]).save('tt.png')
         # vis = torch.cat([inputs[0], latents_masked_images[0], torch.cat([masks[0], masks[0], masks[0], masks[0]], dim=0)], dim=1)
         # # transforms.ToPILImage()(latents[0]).save('tt.png')
