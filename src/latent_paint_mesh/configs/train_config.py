@@ -52,17 +52,24 @@ class OptimConfig:
     # Seed for experiment
     seed: int = 0
     # Total iters
-    # iters: int = 2000
-    iters: int = 5000
+    iters: int = 2000
+    # iters: int = 2500
     # Resume from checkpoint
     resume: bool = False
     # Load existing model
     ckpt: Optional[str] = None
+    
+    ## Diffusion model
+    use_SD: bool = False # if false use Paint-by-Example, if true use stable-diffusion
         
     ## Laplacian weight
     # ref: https://github.com/NasirKhalid24/CLIP-Mesh/blob/d3cf57ebe5e619b48e34d6f0521a31b2707ddd72/configs/paper.yml
     laplacian_weight: float = 100
     laplacian_min: float = 0.6
+    
+    ## loss
+    lambda_pixelwise: float = 1.0
+    
     
     ## Texture Learning rate
     lr: float = 2e-2
