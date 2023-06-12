@@ -51,6 +51,7 @@ class Trainer:
         self.text_z             = self.calc_text_embeddings()
         # self.image_z            = self.calc_image_embeddings()
         # self.image_z, self.image= self.calc_image_embeddings()
+        
         self.optimizer          = self.init_optimizer()
         self.dataloaders        = self.init_dataloaders()
         self.transform = transforms.Compose([
@@ -58,14 +59,17 @@ class Trainer:
                 transforms.Resize((512, 512)),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
-        self.ref_image, self.ref_image_tensor = self.get_image()
-        self.ref_pose  = self.get_reference_pose()
-        self.criterionL1 = nn.L1Loss()
-        self.criterionCLIP   = torch.nn.CosineSimilarity(dim=1, eps=1e-12)
         
+        ### reference image
+        self.ref_image, self.ref_image_tensor = self.get_image()
+        self.ref_image_embeds   = self.get_image_embedding()
+        self.ref_pose           = self.get_reference_pose()
+        self.criterionL1        = nn.L1Loss()
+        self.criterionL2        = nn.MSELoss()
+        self.criterionCLIP      = torch.nn.CosineSimilarity(dim=1, eps=1e-12)
+                
         ## Optimizer for displacement
         self.optimizer_disp     = self.init_optimizer_disp()
-        
         self.past_checkpoints   = []
         if self.cfg.optim.resume:
             self.load_checkpoint(model_only=False)
@@ -95,9 +99,9 @@ class Trainer:
         return model
 
     # def init_diffusion(self) -> StableDiffusion:
-    def init_diffusion(self, SD=False):
+    def init_diffusion(self):
         # text-guided 
-        if SD:
+        if self.cfg.optim.use_SD:
             diffusion_model = StableDiffusion(
                     self.device, 
                     model_name   = self.cfg.guide.diffusion_name,
@@ -140,13 +144,26 @@ class Trainer:
     def get_image(self) -> torch.Tensor:
         image = Image.open(self.cfg.guide.image)
         # return self.transform(image)
-        return image, self.transform(image)
+        return image, self.transform(image).to(self.device)
     
+    # reference image embeding for CLIP loss
+    def get_image_embedding(self):
+        with torch.no_grad():
+            ref_img = self.diffusion.feature_extractor(images=self.ref_image, return_tensors="pt").pixel_values
+            ref_image_embeds = self.diffusion.image_encoder(ref_img.to(self.device))
+            ref_image_embeds = ref_image_embeds.squeeze(1)
+            ref_image_embeds = ref_image_embeds / ref_image_embeds.norm(p=2, dim=-1, keepdim=True)
+        return ref_image_embeds.detach()
+    
+    # Hard coded for experiment
     def get_reference_pose(self):
-        dirs, thetas, phis, radius = circle_poses(self.device, radius=1.25, theta=1e-12, phi=0.0)
+        radius = 1.60
+        thetas = 60.0
+        phis   = 0.0
+        dirs, thetas, phis, radius = circle_poses(self.device, radius=radius, theta=thetas, phi=phis)
         data = {
             'dir'    : dirs,
-            'theta'  : 1e-12,
+            'theta'  : thetas,
             'phi'    : phis,
             'radius' : radius,
         }
@@ -287,19 +304,41 @@ class Trainer:
                 # prev_disp = self.mesh_model.displacement.clone()
                 self.optimizer.zero_grad()
                 self.optimizer_disp.zero_grad()
-
+                descrition = ""
+                
                 # data['image_z'] = self.image_z
                 # pred_rgbs, loss = self.train_render(data)
-                if self.train_step % 10 == 1:
-                    pred_rgbs, lap_loss, loss_guidance = self.train_render_ref_view(data)
+                
+                # reconstruction = self.train_step % 10 == 1
+                reconstruction = self.train_step % 10 == 1
+                # reconstruction = True
+                
+                log = np.random.uniform(0, 1) < 0.05
+                use_clip = False
+                
+                # if False: #self.train_step < 100:
+                if self.train_step < 100:
+                    descrition += "step 1: "
+                    reconstruction = True
+                    # use_clip = False
+                    pred_rgbs, lap_loss, loss_guidance     = self.train_render_reconstruction(data, use_clip=use_clip, log=log)
                 else:
-                    pred_rgbs, lap_loss, loss_guidance = self.train_render(data)
+                    if reconstruction:
+                        descrition += "step 2: "
+                        ### Image Reconstruction loss
+                        # use_clip = np.random.uniform(0, 1) < 0.5
+                        pred_rgbs, lap_loss, loss_guidance = self.train_render_reconstruction(data, use_clip=use_clip, log=log)
+                    else:
+                        descrition += "step 3: "
+                        ### Score Distillation Sampling
+                        pred_rgbs, lap_loss, loss_guidance = self.train_render(data)
                 # sds_grad = self.mesh_model.displacement.grad
                 
                 self.optimizer.step()
                 
                 # import pdb;pdb.set_trace()
-                optim_step = int(50 * 10.**(-self.train_step*5e-05)+1)
+                # optim_step = int(50 * 10.**(-self.train_step*5e-05)+1)
+                
                 # if self.train_step % optim_step == 0:
                                 
                 # ========= use optim_step =========
@@ -338,10 +377,10 @@ class Trainer:
                 new_disp = torch.mean(self.mesh_model.displacement)
                 # vert_mean = torch.mean(self.mesh_model.mesh.vertices)
                 # pbar.set_description("loss: {:.06f} vert: {:.06f} disp:{:.06f}".format(loss.item(), vert_mean, new_disp))
-                descrition = ""
                 
-                descrition += "disp:{:06f}".format(new_disp)
-                descrition += " lap: {:06f} reg:{:06f}".format(lap_loss.item(), reg_loss.item())
+                
+                descrition += "disp:{:05f} ".format(new_disp)
+                descrition += "lap: {:05f} reg:{:05f}".format(lap_loss.item(), reg_loss.item())
                 # ========= use optim_step =========
                 # descrition += "disp:{:06f} disp_step:{}".format(new_disp, next_optim_step)
                 # if self.train_step % optim_step == 0:
@@ -356,7 +395,9 @@ class Trainer:
                     self.mesh_model.train()
                     step_weight +=1
 
-                if np.random.uniform(0, 1) < 0.05:
+                # if np.random.uniform(0, 1) < 0.05:
+                if log and not reconstruction:
+                    # not pixelwise loss :: 'pred_rgbs' should be latent (4 channel)
                     # Randomly log rendered images throughout the training
                     self.log_train_renders(pred_rgbs)
                     
@@ -409,42 +450,85 @@ class Trainer:
 
             logger.info(f"\tDone!")
 
-    def train_render_ref_view(self, data):
-        theta    = self.ref_pose['theta']
-        phi      = self.ref_pose['phi']
-        radius   = self.ref_pose['radius']
-        dim     = self.cfg.render.eval_grid_size
+    def train_render_reconstruction(self, data, use_clip=False, log=False):
+        # if use_clip:
+        #     theta       = data['theta']
+        #     phi         = data['phi']
+        #     radius      = data['radius']
+        # else:
+        #     theta       = self.ref_pose['theta']
+        #     phi         = self.ref_pose['phi']
+        #     radius      = self.ref_pose['radius']
+        theta       = self.ref_pose['theta']
+        phi         = self.ref_pose['phi']
+        radius      = self.ref_pose['radius']
+        dim             = self.cfg.render.eval_grid_size
         
-        # outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
-        import pdb;pdb.set_trace()
-        # theta, phi, radius   = data['theta'], data['phi'], data['radius']
-        # theta, phi, radius   = self.ref_pose['theta'], self.ref_pose['phi'], self.ref_pose['radius']
-        outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, decode_func=self.diffusion.decode_latents,dims=(dim,dim), ref_view=True)
-        outputs = self.mesh_model.render(theta=self.ref_pose['theta'], phi=self.ref_pose['phi'], radius=self.ref_pose['radius'], decode_func=self.diffusion.decode_latents,dims=(dim,dim), ref_view=True)
-        # outputs = self.mesh_model.render(theta=self.ref_pose['theta'], phi=self.ref_pose['phi'], radius=self.ref_pose['radius'], decode_func=self.diffusion.decode_latents,dims=(dim,dim), ref_view=True)
+        ## render latent
+        # outputs_l  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
+        ## render image
+        # outputs  = self.mesh_model.render( ### no grad flow
+        #     theta=theta, phi=phi, radius=radius, 
+        #     decode_func=self.diffusion.decode_latents,
+        #     dims=(dim,dim), ref_view=True)
+        outputs  = self.mesh_model.render(
+            theta       = theta, 
+            phi         = phi, 
+            radius      = radius, 
+            decode_func = self.diffusion.decode_latents_with_grad,
+            dims        = (dim, dim), 
+            ref_view    = True)
         
         ## rendered w/ current texture
-        pred_rgb = outputs['image']
-        pred_rgb_mask = outputs['mask']
-        lap_loss = outputs['lap_loss']
+        pred_rgb        = outputs['image']
+        pred_rgb_mask   = outputs['mask']
+        lap_loss        = outputs['lap_loss']
         
-        ### can not be used because this is not NeRF!! :: camera param, geometry from the image is unknown
-        # loss_guidance = self.criterionL1(self.ref_image_tensor, pred_rgb)
-        loss_guidance = 0
-        
-        ### clip loss
-        # TODO: implement image clip loss        
-        ref_img = self.diffusion.feature_extractor(images=self.ref_image, return_tensors="pt").pixel_values
-        ref_img = ref_img.to(device=self.device)
-        ref_image_embeddings = self.diffusion.image_encoder(ref_img)
-        ### convert image 224 ,224 mean std normalize
-        out_img = F.interpolate(pred_rgb, (224, 224), mode='bicubic')
-        out_img = self.normalize_clip(out_img, self.clip_mean, self.clip_std)
-        out_image_embeddings = self.diffusion.image_encoder(out_img)
-        #### calculate cossim
-                
+        # pred_rgb_l        = outputs_l['image']
         
         
+        ### TODO
+        # problem :: CLIP loss does not properly backprop to texture map
+        if use_clip:
+            ### CLIP Loss
+            out_img = F.interpolate(pred_rgb, (224, 224), mode='bicubic')
+            out_img = self.normalize_clip(out_img, self.clip_mean, self.clip_std)
+            out_image_embeds = self.diffusion.image_encoder(out_img) # CLIP image encoder
+            # out_image_embeds = self.diffusion.CLIP_image_encoder(out_img)[1] # CLIP image encoder
+            # out_image_embeds = out_image_embeds.squeeze(1)
+            # out_image_embeds = out_image_embeds / out_image_embeds.norm(p=2, dim=-1, keepdim=True)
+            
+            with torch.no_grad():
+                ref_img = self.diffusion.feature_extractor(images=self.ref_image, return_tensors="pt").pixel_values
+                ref_img = ref_img.to(self.device)
+                ref_image_embeds = self.diffusion.image_encoder(ref_img)
+                # ref_image_embeds = self.diffusion.CLIP_image_encoder(ref_img)[1]
+                # ref_image_embeds = ref_image_embeds.squeeze(1)
+                # ref_image_embeds = ref_image_embeds / ref_image_embeds.norm(p=2, dim=-1, keepdim=True)
+            
+            #### calculate cossim
+            # loss_guidance = 1.0 - self.criterionCLIP(out_image_embeds, self.ref_image_embeds)
+            # loss_guidance = self.criterionL1(ref_img, out_img)
+            # import pdb; pdb.set_trace()
+            # loss_guidance = (out_image_embeds - ref_image_embeds).norm()
+            loss_guidance = 1.0 - self.criterionCLIP(out_image_embeds, ref_image_embeds)
+        else:
+            ### Pixel-wise Loss
+            ref_image = self.ref_image_tensor.detach()
+            loss_guidance = self.criterionL1(ref_image[None], pred_rgb) #* self.cfg.optim.lambda_pixelwise
+            # loss_guidance = self.criterionL1(ref_image[None], pred_rgb) + self.criterionL2(ref_image[None], pred_rgb)
+            # loss_guidance = self.criterionL1(ref_image*pred_rgb_mask, pred_rgb*pred_rgb_mask) #* self.cfg.optim.lambda_pixelwise
+        if log:
+            save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
+            transforms.ToPILImage()(pred_rgb[0]*0.5 + 0.5).save(save_path)
+            
+        # import pdb; pdb.set_trace()
+        # image_inputs = self.diffusion.image_processor(images=pred_rgb[0], return_tensors="pt").pixel_values
+        loss_guidance.backward()
+        
+        # self.mesh_model.texture_img.norm()
+        # self.mesh_model.texture_img = self.mesh_model.texture_img.detach()
+        # self.mesh_model.texture_img.requires_grad_(True)
         
         # loss_guidance = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image)
         # return pred_rgb, loss
@@ -497,8 +581,12 @@ class Trainer:
     def log_train_renders(self, preds: torch.Tensor):
         if self.mesh_model.latent_mode:
             pred_rgb = self.diffusion.decode_latents(preds).permute(0, 2, 3, 1).contiguous()  # [1, 3, H, W]
+            if not self.cfg.optim.use_SD:
+                pred_rgb = self.diffusion.denorm_img(pred_rgb)
         else:
             pred_rgb = preds.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
+        
+        
         save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
         save_path.parent.mkdir(exist_ok=True)
 
