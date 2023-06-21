@@ -137,7 +137,8 @@ class TexturedMeshModel(nn.Module):
 
         if self.latent_mode:
             colors = guidance.decode_latents(self.texture_img).permute(0, 2, 3, 1).contiguous()
-            colors = guidance.diffusion.denorm_img(colors)
+            if not self.opt.optim.use_SD:
+                colors = guidance.denorm_img(colors)
         else:
             colors = self.texture_img_rgb_finetune.permute(0, 2, 3, 1).contiguous()
 
