@@ -79,12 +79,12 @@ class OptimConfig:
     
     
     ## Texture Learning rate
-    lr: float = 1e-2
+    lr: float = 1e-3
     ## Displacement
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
     # disp_lr: float = 5e-3
-    disp_lr: float = 1e-4
-    lap_weight: float = 10.
+    disp_lr: float = 2e-5
+    lap_weight: float = 100.
     reg_weight: float = 2.
 
 
@@ -96,7 +96,7 @@ class LogConfig:
     # Experiment output dir
     exp_root: Path = Path('experiments/')
     # How many steps between save step
-    save_interval: int = 500
+    save_interval: int = 250
     # Run only test
     eval_only: bool = False
     # Number of angles to sample for eval during training
