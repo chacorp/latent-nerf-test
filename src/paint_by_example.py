@@ -17,15 +17,22 @@ from loguru import logger
 
 import time
 from torchvision import transforms
+import clip
 
 MODEL_NAME = 'Fantasy-Studio/Paint-by-Example'
 CACHE_DIR = "/source/skg/diffusion-project/hugging_cache"
 
+def seed_everything(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    
 class PaintbyExample(nn.Module):
-    def __init__(self, device, \
-        model_name=MODEL_NAME,\
-        latent_mode=True,\
-        cache_dir=CACHE_DIR):
+    def __init__(self, device, 
+                 model_name  = MODEL_NAME,
+                 latent_mode = True,
+                 cache_dir   = CACHE_DIR,
+                 step_range  = [0.2, 0.6]
+                ):
         super().__init__()
 
         try:
@@ -68,9 +75,15 @@ class PaintbyExample(nn.Module):
             , cache_dir=cache_dir, use_auth_token=self.token).to(self.device)
 
         # 4. Create a scheduler for inference
-        self.scheduler = PNDMScheduler.from_pretrained(model_name, subfolder="scheduler", cache_dir=cache_dir, use_auth_token=self.token)
-
+        # self.scheduler = PNDMScheduler.from_pretrained(model_name, subfolder="scheduler", cache_dir=cache_dir, use_auth_token=self.token)
+        self.scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        self.num_train_timesteps = self.scheduler.config.num_train_timesteps
+        self.num_inference_steps = 50
+        self.min_step = int(self.num_train_timesteps * float(step_range[0]))
+        self.max_step = int(self.num_train_timesteps * float(step_range[1]))
         self.alphas = self.scheduler.alphas_cumprod.to(self.device) # for convenience
+        
+        # self.alphas = self.scheduler.alphas_cumprod.to(self.device) # for convenience
        
         logger.info(f'\t successfully loaded stable diffusion!')
         self.linear_rgb_estimator = torch.tensor([
@@ -85,9 +98,35 @@ class PaintbyExample(nn.Module):
             #    L1      L2       L3      L4
             [[0.9071, -0.7711,  0.7437,  0.1510]]
         ).unsqueeze(-1).unsqueeze(-1).to(self.device)
-
+        
+        self.aug = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
+        
     def clip_image_process(self, np_img):
         return self.feature_extractor(np_img, return_tensors="pt").pixel_values.to(self.device)
+
+
+    def img_clip_loss(self, clip_model, rgb1, rgb2):
+        image_z_1 = clip_model.encode_image(self.aug(rgb1))
+        image_z_2 = clip_model.encode_image(self.aug(rgb2))
+        image_z_1 = image_z_1 / image_z_1.norm(dim=-1, keepdim=True) # normalize features
+        image_z_2 = image_z_2 / image_z_2.norm(dim=-1, keepdim=True) # normalize features
+
+        loss = - (image_z_1 * image_z_2).sum(-1).mean()
+        return loss
+    
+    def img_text_clip_loss(self, clip_model, rgb, prompt):
+        image_z_1 = clip_model.encode_image(self.aug(rgb))
+        image_z_1 = image_z_1 / image_z_1.norm(dim=-1, keepdim=True) # normalize features
+
+        text = clip.tokenize(prompt).to(self.device)
+        text_z = clip_model.encode_text(text)
+        text_z = text_z / text_z.norm(dim=-1, keepdim=True)
+        loss = - (image_z_1 * text_z).sum(-1).mean()
+        return loss
+
 
     def get_text_embeds(self, prompt):
         # Tokenize text and get embeddings
@@ -114,6 +153,7 @@ class PaintbyExample(nn.Module):
         # Cat for final embeddings
         text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
         return text_embeddings
+
 
     def _encode_image(self, image, num_images_per_prompt=1):
         if not isinstance(image, torch.Tensor):
@@ -144,10 +184,11 @@ class PaintbyExample(nn.Module):
             image_embeddings,
             guidance_scale=7.5):
 
-        from tqdm import tqdm
-        print("denoise...")
+        # from tqdm import tqdm
+        # print("denoise...")
         with torch.autocast('cuda'):
-            for i, t in tqdm(enumerate(self.scheduler.timesteps)):
+            for i, t in enumerate(self.scheduler.timesteps):
+            # for i, t in tqdm(enumerate(self.scheduler.timesteps)):
                 # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
                 # latents = [1, 4, 64, 64]
                 
@@ -157,18 +198,12 @@ class PaintbyExample(nn.Module):
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t) 
                 # -> [2, 4, 64, 64]
                 
-                latent_model_input = torch.cat([latent_model_input,
-                                                latents_masked_images,
-                                                latents_masks], dim=1)
+                latent_model_input = torch.cat([latent_model_input, latents_masked_images, latents_masks], dim=1)
                 # -> [2, 9, 64, 64]
-                # import pdb;pdb.set_trace()
-                
                 
                 # predict the noise residual
                 with torch.no_grad():
-                    noise_pred = self.unet(latent_model_input,
-                                            t,
-                                            encoder_hidden_states=image_embeddings)['sample']
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=image_embeddings)['sample']
 
                 # perform guidance
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -178,13 +213,13 @@ class PaintbyExample(nn.Module):
                 # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs)['prev_sample']
                 latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
                 
-                if i % 5==0 and 0:
-                    vis = torch.cat([
-                            latents[0],
-                            latents_masked_images[0],
-                            torch.cat([latents_masks[0], latents_masks[0], latents_masks[0], latents_masks[0]], dim=0),
-                        ], dim=1)
-                    torchvision.utils.save_image(vis, 'ttt{:03}.png'.format(i))
+                # if i % 5==0 and 0:
+                #     vis = torch.cat([
+                #             latents[0],
+                #             latents_masked_images[0],
+                #             torch.cat([latents_masks[0], latents_masks[0], latents_masks[0], latents_masks[0]], dim=0),
+                #         ], dim=1)
+                #     torchvision.utils.save_image(vis, 'ttt{:03}.png'.format(i))
                 #     # import pdb;pdb.set_trace()
                 #     # transforms.ToPILImage()(approx).save('tt.png')
                 #     # transforms.ToPILImage()(latents[0]).save('tt.png')
@@ -206,7 +241,7 @@ class PaintbyExample(nn.Module):
         # imgs = (imgs / 2 + 0.5).clamp(0, 1)
         return imgs
 
-    def decode_latents_with_grad(self, latents):
+    def decode_latents_grad(self, latents):
         # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
         latents = 1 / 0.18215 * latents
 
@@ -233,17 +268,18 @@ class PaintbyExample(nn.Module):
         guidance_scale=7.5,
         latents=None):
         """
-        images (torch.Tensor): [B, 3, H, W]
-        masks (torch.Tensor):  [B, 1, H, W]
-        example_images (torch.Tensor): [B, 3, 224, 244] --> preprocess with clip_image_process
-        num_inference_steps (int): number of inference steps
-        guidance_scale (float): guidance scale
-        strength (float): strength of the original input images
-        latents (torch.Tensor): [B, 4, H//8, W//8]
-
-        input image range: [0, 1]
-        mask range: [0, 1]
-        output image range: [0, 1]
+        Args
+            images (torch.Tensor): [B, 3, H, W]
+            masks (torch.Tensor):  [B, 1, H, W]
+            example_images (torch.Tensor): [B, 3, 224, 244] --> preprocess with clip_image_process
+            num_inference_steps (int): number of inference steps
+            guidance_scale (float): guidance scale
+            strength (float): strength of the original input images
+            latents (torch.Tensor): [B, 4, H//8, W//8]
+        Return
+            input image range: [0, 1]
+            mask range: [0, 1]
+            output image range: [0, 1]
         """
         # normalize images
         images = self.normalize_img(images)
@@ -307,9 +343,72 @@ class PaintbyExample(nn.Module):
             latents=latents,
             image_embeddings=img_embeds,
             guidance_scale=guidance_scale) 
-        
+        # import pdb;pdb.set_trace()
+        # transforms.ToPILImage()((latents[0]*0.5 + 0.5)).save('test.png')
         # decode
         imgs = self.decode_latents(latents) # [1, 3, 512, 512]
+
+        # denormalize imgs
+        imgs = self.denorm_img(imgs)
+        return imgs
+
+    def lantent_forward(self,
+        latents, 
+        latents_masks, 
+        example_images, 
+        num_inference_steps=50, 
+        strength=0.8, 
+        guidance_scale=7.5,
+        rand_latent = False,
+        ):
+        """
+        Args
+            images (torch.Tensor): [B, 4, 64, 64]
+            masks (torch.Tensor):  [B, 1, 64, 64]
+            example_images (torch.Tensor): [B, 3, 224, 244] --> preprocess with clip_image_process
+            num_inference_steps (int): number of inference steps
+            guidance_scale (float): guidance scale
+            strength (float): strength of the original input images
+            latents (torch.Tensor): [B, 4, H//8, W//8]
+        Return
+            input image range:  [0, 1]
+            mask range:         [0, 1]
+            output image range: [0, 1]
+        """
+        latents_masks = 1 - latents_masks
+        latents_masked_images = latents * latents_masks
+        # latents_grey_masks    = torch.cat([latents_masks] * 4, dim=1) * self.latent_grey
+        # latents_masked_images = latents_masked_images + latents_grey_masks
+        latents_masked_images = latents_masked_images
+        
+        # --------------------------------------------------------------
+        # image clip embedding
+        
+        example_images = self.clip_image_process(example_images)
+        img_embeds, neg_img_embeds = self.image_encoder(example_images, return_uncond_vector=True)
+        img_embeds = torch.cat([neg_img_embeds, img_embeds])
+                
+        # set timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=self.device)
+       
+        # guided inference
+        latents_masks         = torch.cat([latents_masks]*2, dim=0)
+        latents_masked_images = torch.cat([latents_masked_images]*2, dim=0)
+       
+        # set random lantent
+        if rand_latent:
+            latents = torch.randn_like(latents, device=self.device)
+       
+        # Text embeds -> img latents
+        latents = self.produce_latents(
+            latents_masked_images=latents_masked_images,
+            latents_masks=latents_masks,
+            latents=latents,
+            image_embeddings=img_embeds,
+            guidance_scale=guidance_scale) 
+        # import pdb;pdb.set_trace()
+        # decode
+        imgs = self.decode_latents_grad(latents) # [1, 3, 512, 512]
 
         # denormalize imgs
         imgs = self.denorm_img(imgs)
@@ -419,13 +518,16 @@ class PaintbyExample(nn.Module):
     def train_step(self, 
                    inputs,              # latent
                    input_masks,         # latent mask
-                   example_images,      # exampler image
+                   example_images,      # exampler image PIL.Image
                    guidance_scale=100,
+                   use_clip = False,
+                   convert = False,
                    ):
         """
-        inputs (torch.Tensor):          [N, 4, 64, 64], rendered latent image
-        input_masks (torch.Tensor):     [N, 1, 64, 64], rendered latent image
-        example_images (PIL.Image):     [N, 3, H, W],   examplar image
+        Args
+            inputs (torch.Tensor):          [N, 4, 64, 64], rendered latent image
+            input_masks (torch.Tensor):     [N, 1, 64, 64], rendered latent image
+            example_images (PIL.Image):     examplar image
         """
         if not self.latent_mode:
             # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
@@ -436,10 +538,12 @@ class PaintbyExample(nn.Module):
             
         t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=self.device)
         
-        masks      = 1 - input_masks
-        grey_masks = torch.cat([input_masks] * 4, dim=1) * self.latent_grey
-        latents_masked_images =  inputs * masks + grey_masks
-
+        masks         = 1 - input_masks
+        masked_images = inputs * masks        
+        latents_grey_masks    = torch.cat([input_masks] * 4, dim=1) * self.latent_grey
+        latents_masked_images = masked_images + latents_grey_masks
+        
+        
         # #### test!!!
         # self.approx_latent2rgb(example_images)
             
@@ -472,7 +576,7 @@ class PaintbyExample(nn.Module):
             latent_model_input = torch.cat([latents_noisy] * 2)             # torch.Size([2, 4, 64, 64])
             latents_masked_images = torch.cat([latents_masked_images] * 2)  # torch.Size([2, 4, 64, 64])
             latents_masks = torch.cat([masks] * 2)                    # torch.Size([2, 1, 64, 64])
-            
+            # import pdb;pdb.set_trace()
             latent_model_input = torch.cat([latent_model_input,
                                             latents_masked_images,
                                             latents_masks], dim=1)
@@ -491,18 +595,30 @@ class PaintbyExample(nn.Module):
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        # w(t), alpha_t * sigma_t^2
-        # w = (1 - self.alphas[t])
-        w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
-        grad = w * (noise_pred - noise)
-            
-        # import pdb;pdb.set_trace()
-        # manually backward, since we omitted an item in grad and cannot simply autodiff.
-        # _t = time.time()
-        latents.backward(gradient=grad, retain_graph=True)
-        # torch.cuda.synchronize(); print(f'[TIME] guiding: backward {time.time() - _t:.4f}s')
-            
-        return 0 # dummy 
+        # if (t / self.num_train_timesteps) <= 0.4:
+        if use_clip:
+            self.scheduler.set_timesteps(self.num_train_timesteps)
+            de_latents = self.scheduler.step(noise_pred, t, latents_noisy)['prev_sample']
+            # de_latents = de_latents.detach().requires_grad_()
+            imgs = self.decode_latents(de_latents)
+            imgs = self.denorm_img(imgs)
+            return imgs
+                    
+        else:        
+            # # clip grad for stable training?       
+            # w(t), alpha_t * sigma_t^2
+            w = (1 - self.alphas[t])
+            # w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
+            grad = w * (noise_pred - noise)
+            grad = torch.nan_to_num(grad)
+                
+            # import pdb;pdb.set_trace()
+            # manually backward, since we omitted an item in grad and cannot simply autodiff.
+            # _t = time.time()
+            latents.backward(gradient=grad, retain_graph=True)
+            # torch.cuda.synchronize(); print(f'[TIME] guiding: backward {time.time() - _t:.4f}s')
+    
+            return 0 # dummy 
         
     @staticmethod
     def to_numpy(tensor):

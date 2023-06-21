@@ -9,6 +9,7 @@ from transformers import (
     AutoProcessor,
     CLIPTextModelWithProjection, 
     CLIPVisionModelWithProjection,
+    CLIPFeatureExtractor,
     CLIPModel,
 )
 from diffusers import (
@@ -28,7 +29,7 @@ from loguru import logger
 from PIL import Image
 from tqdm import tqdm
 import time
-
+import clip
 
 # contrastive loss function, adapted from
 # https://sachinruk.github.io/blog/pytorch/pytorch%20lightning/loss%20function/gpu/2021/03/07/CLIP.html
@@ -42,11 +43,14 @@ def clip_loss(similarity: torch.Tensor) -> torch.Tensor:
     return (caption_loss + image_loss) / 2.0
 
 
+CACHE_DIR = "/source/skg/diffusion-project/hugging_cache"
 class StableDiffusion(nn.Module):
     def __init__(self, device, 
-                 model_name='CompVis/stable-diffusion-v1-4',
-                 concept_name=None, 
-                 latent_mode=True):
+                 model_name     = 'CompVis/stable-diffusion-v1-4',
+                 concept_name   = None, 
+                 latent_mode    = True,
+                 cache_dir      = CACHE_DIR,
+                 ):
         super().__init__()
 
         try:
@@ -75,12 +79,14 @@ class StableDiffusion(nn.Module):
         # self.image_encoder = None
         # self.image_processor = None
         
-        # self.text_encoder = CLIPTextModelWithProjection.from_pretrained(self.model_id).to(self.device)
+        self.text_encoder  = CLIPTextModelWithProjection.from_pretrained(self.model_id).to(self.device)
         # self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.model_id).to(self.device)
-        self.image_processor = AutoProcessor.from_pretrained(self.model_id)
-        self.clipmodel       = CLIPModel.from_pretrained(self.model_id).to(self.device)
+        
+        # self.image_processor = AutoProcessor.from_pretrained(self.model_id)
+        # self.clipmodel       = CLIPModel.from_pretrained(self.model_id).to(self.device)
         self.criterionCLIP   = torch.nn.CosineSimilarity(dim=1, eps=1e-15)
         self.criterionL1     = torch.nn.L1Loss()
+        
         self.transform = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Resize((512, 512)),
@@ -96,10 +102,36 @@ class StableDiffusion(nn.Module):
         # 4. Create a scheduler for inference
         self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=self.num_train_timesteps)
         self.alphas = self.scheduler.alphas_cumprod.to(self.device) # for convenience
-
+        
         if concept_name is not None:
             self.load_concept(concept_name)
         logger.info(f'\t successfully loaded stable diffusion!')
+        
+        self.aug = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
+
+
+    def img_clip_loss(self, clip_model, rgb1, rgb2):
+        image_z_1 = clip_model.encode_image(self.aug(rgb1))
+        image_z_2 = clip_model.encode_image(self.aug(rgb2))
+        image_z_1 = image_z_1 / image_z_1.norm(dim=-1, keepdim=True) # normalize features
+        image_z_2 = image_z_2 / image_z_2.norm(dim=-1, keepdim=True) # normalize features
+
+        loss = - (image_z_1 * image_z_2).sum(-1).mean()
+        return loss
+    
+    def img_text_clip_loss(self, clip_model, rgb, prompt):
+        image_z_1 = clip_model.encode_image(self.aug(rgb))
+        image_z_1 = image_z_1 / image_z_1.norm(dim=-1, keepdim=True) # normalize features
+
+        text = clip.tokenize(prompt).to(self.device)
+        text_z = clip_model.encode_text(text)
+        text_z = text_z / text_z.norm(dim=-1, keepdim=True)
+        loss = - (image_z_1 * text_z).sum(-1).mean()
+        return loss
+
 
     def load_concept(self, concept_name):
         repo_id_embeds = f"sd-concepts-library/{concept_name}"
@@ -142,9 +174,9 @@ class StableDiffusion(nn.Module):
             return_tensors='pt')
 
         with torch.no_grad():
-            # text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
+            text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
             # text_embeddings = self.text_encoder(text_input.input_ids.to(self.device)).text_embeds
-            text_embeddings = self.clipmodel.text_model(text_input.input_ids.to(self.device))[0]
+            # text_embeddings = self.clipmodel.text_model(text_input.input_ids.to(self.device))[0]
 
         # Do the same for unconditional embeddings
         uncond_input = self.tokenizer(
@@ -154,16 +186,20 @@ class StableDiffusion(nn.Module):
             return_tensors='pt')
 
         with torch.no_grad():
-            # uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
+            uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
             # uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device)).text_embeds
-            uncond_embeddings = self.clipmodel.text_model(uncond_input.input_ids.to(self.device))[0]
+            # uncond_embeddings = self.clipmodel.text_model(uncond_input.input_ids.to(self.device))[0]
 
         # Cat for final embeddings
         text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
         return text_embeddings
 
     def get_image_embeds(self, image_path):
-        image = Image.open(image_path)
+        if type(image_path) == str:
+            image = Image.open(image_path)
+        else:
+            image = image_path
+            
         image_inputs = self.image_processor(
                 images=image, 
                 return_tensors="pt"
@@ -277,13 +313,11 @@ class StableDiffusion(nn.Module):
 
     def train_step(self, 
                    text_embeddings, 
-                   image_embeddings, 
                    inputs, 
                    guidance_scale=100):
         """
         Input:
             text_embeddings:    (n, 768), text feature after the projection
-            image_embeddings:   (n, 768), image feature after the projection
             inputs:             (n,c,h,w), rendered latent image
         """
         # interp to 512x512 to be fed into vae.
@@ -331,6 +365,7 @@ class StableDiffusion(nn.Module):
 
         # clip grad for stable training?
         # grad = grad.clamp(-1, 1)
+        # grad = torch.nan_to_num(grad)
 
         # manually backward, since we omitted an item in grad and cannot simply autodiff.
         # _t = time.time()
