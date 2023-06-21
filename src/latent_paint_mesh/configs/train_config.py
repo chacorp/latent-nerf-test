@@ -8,13 +8,15 @@ from loguru import logger
 class RenderConfig:
     """ Parameters for the Mesh Renderer """
     # Render height,width for training
-    train_grid_size: int = 64
+    # train_grid_size: int = 64
+    train_grid_size: int = 128
     # Render height,width for evaluation
     eval_grid_size: int = 512
     # training camera radius range
-    radius_range: Tuple[float, float] = (1.45, 1.75)
+    # radius_range: Tuple[float, float] = (1.45, 1.75)
+    radius_range: Tuple[float, float] = (0.8, 1.0)
     # Set [0,angle_overhead] as the overhead region
-    angle_overhead: float = 30
+    angle_overhead: float = 40
     # Define the front angle region
     angle_front: float = 70
     # Which NeRF backbone to use
@@ -35,11 +37,16 @@ class GuideConfig:
     # A huggingface diffusion model to use
     # diffusion_name: str = 'CompVis/stable-diffusion-v1-4'
     # diffusion_name: str = 'runwayml/stable-diffusion-v1-5'
-    diffusion_name: str = '/source/kseo/hugging_cache/models--runwayml--stable-diffusion-v1-5/snapshots/39593d5650112b4cc580433f6b0435385882d819/'
+    diffusion_name: str = '/source/kseo/hugging_cache/models--runwayml--stable-diffusion-v1-5/snapshots/39593d5650112b4cc580433f6b0435385882d819'
+    # diffusion_name: str = '/source/kseo/huggingface_cache/models--runwayml--stable-diffusion-v1-5/snapshots/aa9ba505e1973ae5cd05f5aedd345178f52f8e6a'
+    guidance_scale: float = 7.5
+    
     # Scale of mesh in 1x1x1 cube
     shape_scale: float = 0.6
     # height of mesh
     dy: float = 0.25
+    # dy: float = 0.7
+    
     # texture image resolution
     texture_resolution=128
     # texture mapping interpolation mode from texture image, options: 'nearest', 'bilinear', 'bicubic'
@@ -52,8 +59,8 @@ class OptimConfig:
     # Seed for experiment
     seed: int = 0
     # Total iters
-    iters: int = 2000
-    # iters: int = 2500
+    # iters: int = 1000
+    iters: int = 3000
     # Resume from checkpoint
     resume: bool = False
     # Load existing model
@@ -72,12 +79,12 @@ class OptimConfig:
     
     
     ## Texture Learning rate
-    lr: float = 2e-2
+    lr: float = 1e-2
     ## Displacement
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
     # disp_lr: float = 5e-3
     disp_lr: float = 1e-4
-    lap_weight: float = 5.
+    lap_weight: float = 10.
     reg_weight: float = 2.
 
 
