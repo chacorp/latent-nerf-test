@@ -54,8 +54,8 @@ class Trainer:
             self.normalize_clip = lambda x, mu, std: (x - mu) / std
         ### depricated ####################################################################
         
-        self.text_z             = self.clip_text_embeddings(self.cfg.guide.text)
-        # self.text_z             = self.calc_text_embeddings()
+        # self.text_z             = self.clip_text_embeddings(self.cfg.guide.text)
+        self.text_z             = self.calc_text_embeddings()
         # self.image_z            = self.calc_image_embeddings()
         # self.image_z, self.image= self.calc_image_embeddings()
         
@@ -118,7 +118,7 @@ class Trainer:
         # text-guided 
         if self.cfg.optim.use_SD:
             MODEL_NAME = '/source/kseo/huggingface_cache/models--runwayml--stable-diffusion-v1-5/snapshots/aa9ba505e1973ae5cd05f5aedd345178f52f8e6a'
-            CACHE_DIR = "/source/skg/diffusion-project/hugging_cache"
+            CACHE_DIR = "/source/kseo/huggingface_cache"
             diffusion_model = StableDiffusion(
                     self.device, 
                     # model_name   = self.cfg.guide.diffusion_name,
@@ -129,7 +129,7 @@ class Trainer:
                 )
         else:
             MODEL_NAME = 'Fantasy-Studio/Paint-by-Example'
-            CACHE_DIR = "/source/skg/diffusion-project/hugging_cache"
+            CACHE_DIR = "/source/kseo/huggingface_cache"
             diffusion_model = PaintbyExample(
                     self.device, 
                     model_name  = MODEL_NAME,
@@ -149,8 +149,9 @@ class Trainer:
         clip.model.convert_weights(model)
         return model, preprocess
         
-    def clip_text_embeddings(self, text):
+    def clip_text_embeddings(self, text, init=True):
         # Prepare the inputs
+        ref_text = self.cfg.guide.text
         text_inputs = clip.tokenize(text).to(self.device)
 
         # Calculate features
@@ -219,61 +220,6 @@ class Trainer:
             ref_image_embeds = ref_image_embeds.squeeze(1)
             ref_image_embeds = ref_image_embeds / ref_image_embeds.norm(p=2, dim=-1, keepdim=True)
         return ref_image_embeds.detach()
-    
-    def optimize_text_token(self, prompt, image_features, image, max_itr=100):
-        """
-        Not used
-        """
-        with torch.no_grad():
-            text_features = self.clip_text_embeddings(prompt)
-            uncond_features = self.clip_text_embeddings([''] * len(prompt))
-            
-            ## normalized image feature
-            image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-        text_features.requires_grad = True
-                
-        itr = 0
-        save_itr = max_itr // 5
-        # max_itr = 100
-        pbar = tqdm(total=max_itr, initial=itr)
-        # optimizer = torch.optim.Adam([text_embeddings], lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
-        optimizer = torch.optim.Adam([text_features], lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
-        # scheduler = torch.optim.lr_scheduler.LambdaLR(
-        #     optimizer=optimizer,
-        #     lr_lambda=lambda epoch: 0.95 ** epoch,
-        #     last_epoch=-1,
-        #     verbose=False)
-
-        text_optimized = None
-        prev_loss = 100
-        while itr < max_itr:
-            itr += 1
-            pbar.update(1)
-            
-            optimizer.zero_grad()
-            # normalized text features
-            text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
-
-            ## cosine similarity
-            loss = self.criterionCLIP(text_features, image_features.detach())
-            
-            loss.backward()
-            optimizer.step()
-            
-            # pbar.set_description("prev: {:06f} loss: {:06f} ".format(prev_loss, loss.item()))
-            pbar.set_description("loss: {:06f} ".format(loss.item()))
-            
-            if loss < prev_loss:
-                prev_loss      = loss.item()
-                # text_optimized = text_embeddings.detach().clone()
-                text_optimized = text_features.detach().clone()
-                
-            # if itr % save_itr == 0 or itr == max_itr:
-            #     img = self.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_embeddings]))                
-            #     Image.fromarray(img[0]).save('test_{:03}.png'.format(itr))
-            #     img = self.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_optimized]))
-            #     Image.fromarray(img[0]).save('best.png')
-        return text_optimized
     ### depricated ######################################################################################
     
 
@@ -337,7 +283,8 @@ class Trainer:
 
         ### TODO:
         ## 1. optimize text_x that best represents the image using CLIP CosSim loss
-        # image_text_z = self.diffusion.optimize_text_token([self.cfg.guide.text], self.image_z, self.image, max_itr=100)
+        image_text_z = self.diffusion.optimize_text_token([self.cfg.guide.text], self.image_z, self.image, max_itr=100)
+        import pdb;pdb.set_trace()
         ## 2. use Paint-by-Example
 
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
@@ -436,23 +383,18 @@ class Trainer:
                 ## optimize displacement interval
                 self.optimizer_disp.step()
                 
-                # new_disp = self.mesh_model.displacement - prev_disp
                 new_disp = torch.mean(self.mesh_model.displacement)
-                # vert_mean = torch.mean(self.mesh_model.mesh.vertices)
-                # pbar.set_description("loss: {:.06f} vert: {:.06f} disp:{:.06f}".format(loss.item(), vert_mean, new_disp))
-                
-                
-                descrition += "disp:{:05f} ".format(new_disp)
+                descrition += "disp:{:05f} ".format(new_disp)                
                 descrition += "lap: {:05f} reg:{:05f} ".format(lap_loss.item(), reg_loss.item())
-                if use_clip:
+                if use_clip and reconstruction:
                     descrition += "clip:{:05f} ".format(loss_guidance.item())
+                    
                 # ========= use optim_step =========
                 # descrition += "disp:{:06f} disp_step:{}".format(new_disp, next_optim_step)
                 # if self.train_step % optim_step == 0:
                 #     descrition += " lap: {:06f} reg:{:06f}".format(lap_loss.item(), reg_loss.item())
                 
                 pbar.set_description(descrition)
-                # pbar.set_description("disp:{}".format(self.mesh_model.displacement[0]))
 
                 if self.train_step % self.cfg.log.save_interval == 0:
                     self.save_checkpoint(full=True)
@@ -529,10 +471,7 @@ class Trainer:
         ## render latent
         outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
         ## render image
-        # outputs2  = self.mesh_model.render(
-        #     theta       = theta, 
-        #     phi         = phi, 
-        #     radius      = radius, 
+        # outputs2  = self.mesh_model.render(theta=theta, phi=phi, radius=radius,
         #     decode_func = self.diffusion.decode_latents_grad,
         #     dims        = (dim, dim), 
         #     ref_view    = True)
@@ -550,24 +489,18 @@ class Trainer:
                 text_z = self.text_z[dirs]
             else:
                 text_z = self.text_z
-            #### need to replace it as img2img translation ##################################################################
+            #### need to replace it SDedit ##################################################################
             diff_rgb = self.diffusion.train_step(text_z, pred_rgb) # noisy image
-            #### need to replace it as img2img translation ##################################################################
-        else:          
-            # import pdb; pdb.set_trace()
-            # ref_img = self.diffusion.feature_extractor(images=self.ref_image, return_tensors="pt").pixel_values # [B, 3, 224, 244]
-            # diff_rgb2 = self.diffusion(outputs2['image'], outputs2['mask'], ref_img.to(self.device), num_inference_steps=25)
-            # transforms.ToPILImage()((outputs2['image'][0]*0.5+0.5)*outputs2['mask'][0]).save('test.png') # rgb texture (noise)
-            # transforms.ToPILImage()((diff_rgb2[0])*outputs2['mask'][0]).save('test.png') # rgb image
-            
-            # transforms.ToPILImage()((outputs2['image'][0])*outputs2['mask'][0]).save('test.png')
+            #### need to replace it SDedit ##################################################################
+        else:
             # diff_rgb = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image, self.ref_image_tensor, 
             #                                      use_clip=use_clip)
-            diff_rgb = self.diffusion.lantent_forward(pred_rgb, pred_rgb_mask, self.ref_image, 25, rand_latent=True)
-            diff_rgb2 = self.diffusion.lantent_forward(pred_rgb, pred_rgb_mask, self.ref_image, 25, rand_latent=False)
-            rand_rgb = torch.randn_like(pred_rgb, device=self.device)
+            diff_rgb = self.diffusion.lantent_forward(pred_rgb, pred_rgb_mask, self.ref_image, 25, rand_latent=False)
+            # diff_rgb2 = self.diffusion.lantent_forward(pred_rgb, pred_rgb_mask, self.ref_image, 25, rand_latent=False)
+            # rand_rgb = torch.randn_like(pred_rgb, device=self.device)
+            
             # transforms.ToPILImage()(((pred_rgb[0])*pred_rgb_mask[0])[:3]).save('test.png') # latent 
-            import pdb;pdb.set_trace()
+            # import pdb;pdb.set_trace()
             # _rgb_mask = F.interpolate(pred_rgb_mask, (512, 512), mode='bilinear', align_corners=False)
             # transforms.ToPILImage()((diff_rgb[0])*pred_rgb_mask[0]).save('test.png')
             # transforms.ToPILImage()(diff_rgb[0]).save('test.png')
@@ -595,10 +528,8 @@ class Trainer:
             # loss_guidance = self.criterionL1(ref_image[None], pred_rgb) + self.criterionL2(ref_image[None], pred_rgb)
             # loss_guidance = self.criterionL1(ref_image*pred_rgb_mask, pred_rgb*pred_rgb_mask) #* self.cfg.optim.lambda_pixelwise
         
-        
         if log:
             save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
-            # import pdb;pdb.set_trace()
             # transforms.ToPILImage()(pred_rgb[0]*0.5 + 0.5).save(save_path)
             transforms.ToPILImage()(diff_rgb[0]*0.5 + 0.5).save(save_path)
             
@@ -619,33 +550,31 @@ class Trainer:
         phi      = data['phi']
         radius   = data['radius']
 
+        # import pdb;pdb.set_trace()
         outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
         
         ## rendered w/ current texture
-        pred_rgb = outputs['image']
-        pred_rgb_mask = outputs['mask']
-        lap_loss = outputs['lap_loss']
+        pred_rgb        = outputs['image']      # [B, 3, H, W]
+        pred_rgb_mask   = outputs['mask']       # [B, 1, H, W]
+        lap_loss        = outputs['lap_loss']
         
         # import pdb;pdb.set_trace()
         # pred_back = outputs['background']
         # print('{}'.format(pred_back[0,0,0]))
         
-        # # text embeddings
-        if self.cfg.guide.append_direction:
-            dirs = data['dir']  # [B,]
-            text_z = self.text_z[dirs]
-        else:
-            text_z = self.text_z
-        
-        
         # Guidance loss
         if self.cfg.optim.use_SD:
+            # # text embeddings
+            if self.cfg.guide.append_direction:
+                dirs = data['dir']  # [B,]
+                text_z = self.text_z[dirs]
+            else:
+                text_z = self.text_z
             # import pdb;pdb.set_trace()
             # loss_guidance = self.diffusion.train_step(text_z, pred_rgb, self.ref_image)
             loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
         else:
             loss_guidance = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image)
-        import pdb;pdb.set_trace()
         # loss = loss_guidance # dummy
 
         # return pred_rgb, loss
