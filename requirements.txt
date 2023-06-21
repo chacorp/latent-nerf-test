@@ -13,3 +13,4 @@ matplotlib
 pyrallis
 loguru
 tqdm
+ftfy
