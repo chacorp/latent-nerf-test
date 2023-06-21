@@ -7,7 +7,8 @@ from src.utils import get_view_direction
 
 
 def rand_poses(size, device, 
-        radius_range   = (1.2, 1.75),#(1.0, 1.5), 
+        # radius_range   = (1.2, 1.75),#(1.0, 1.5), 
+        radius_range   = (0.8, 1.2),
         theta_range    = (0.0, 150.0), 
         phi_range      = (0.0, 360.0),
         angle_overhead = 30.0, 
