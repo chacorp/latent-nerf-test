@@ -68,6 +68,7 @@ class OptimConfig:
     
     ## Diffusion model
     use_SD: bool = False # if false use Paint-by-Example, if true use stable-diffusion
+    use_opt_txt: bool = False # if True, use optimized text feature (opitimize guide.text closer to guide.image using CLIP loss)
         
     ## Laplacian weight
     # ref: https://github.com/NasirKhalid24/CLIP-Mesh/blob/d3cf57ebe5e619b48e34d6f0521a31b2707ddd72/configs/paper.yml
@@ -79,11 +80,15 @@ class OptimConfig:
     
     
     ## Texture Learning rate
-    lr: float = 1e-3
+    # lr: float = 1e-3
+    # lr: float = 2e-3
+    # lr: float = 2e-2
+    lr: float = 15e-3
     ## Displacement
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
     # disp_lr: float = 5e-3
-    disp_lr: float = 2e-5
+    # disp_lr: float = 2e-5
+    disp_lr: float = 3e-5
     lap_weight: float = 100.
     reg_weight: float = 2.
 

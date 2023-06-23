@@ -54,10 +54,11 @@ class Trainer:
             self.normalize_clip = lambda x, mu, std: (x - mu) / std
         ### depricated ####################################################################
         
-        # self.text_z             = self.clip_text_embeddings(self.cfg.guide.text)
-        self.text_z             = self.calc_text_embeddings()
+        # self.text_z             = self.calc_text_embeddings()
+        self.text_z             = self.ref_text_embeddings()
         # self.image_z            = self.calc_image_embeddings()
         # self.image_z, self.image= self.calc_image_embeddings()
+        self.image_z            = self.ref_image_embeddings()
         
         self.optimizer          = self.init_optimizer()
         self.dataloaders        = self.init_dataloaders()
@@ -145,31 +146,23 @@ class Trainer:
     def init_clip(self):
         # Load the model
         # model, preprocess = clip.load('ViT-B/32', self.device)
-        model, preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
+        if self.cfg.optim.use_SD:
+            model, preprocess = clip.load("ViT-L/14", device=self.device, jit=False)
+        else:
+            model, preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
         clip.model.convert_weights(model)
         return model, preprocess
         
-    def clip_text_embeddings(self, text, init=True):
-        # Prepare the inputs
-        ref_text = self.cfg.guide.text
-        text_inputs = clip.tokenize(text).to(self.device)
-
-        # Calculate features
-        with torch.no_grad():
-            text_features = self.clip_model.encode_text(text_inputs)
-            
-        # Normalize features
-        # text_features /= text_features.norm(dim=-1, keepdim=True)
-        return text_features
-    
-    # def convert_image_to_rgb(self, image):
-    #     return image.convert("RGB")
-        
-    def clip_image_embeddings(self, image):
+    def _clip_image_embeddings(self, image):
+        """
+        Args:
+            image (PIL.Image or torch.Tensor): input image 
+        returns:
+            image_features (torch.Tensor): 
+        """
         # Prepare the inputs (convert PIL.Image to torch.Tensor)
         if type(image) == torch.Tensor:
-            # image_input = self.clip_transform(image).to(self.device)
-            image = F.interpolate(image, (224, 224), mode='bicubic')
+            image = F.interpolate(image, (224, 224), mode='bilinear')
             image_input = self.normalize_clip(image)
         else:
             image_input = self.clip_preprocess(image).unsqueeze(0).to(self.device)
@@ -179,39 +172,45 @@ class Trainer:
             image_features = self.clip_model.encode_image(image_input)
         
         # Normalize features
-        # image_features /= image_features.norm(dim=-1, keepdim=True)
+        # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features
     
-    def clip_image_embeddings_grad(self, image):
-        # Prepare the inputs
-        image_input = F.interpolate(image, (224, 224), mode='bicubic')
-            
-        # import pdb;pdb.set_trace()
-        # Calculate features
-        image_features = self.clip_model.encode_image(image_input)
+    def clip_image_embeddings(self, image, use_grad=False):
+        if use_grad:
+            return self._clip_image_embeddings(image)
+        else:
+            with torch.no_grad():
+                return self._clip_image_embeddings(image)
         
-        # Normalize features
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        return image_features
-    
-    ### depricated ######################################################################################
-    def calc_text_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def ref_text_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
         ref_text = self.cfg.guide.text
+        use_grad = self.cfg.optim.use_opt_txt
         
+        ####
+        # TODO:
+        # works with transformer CLIP self.diffusion.get_text_embeds
+        # does not work with openAI clip -> why?
+            
         if not self.cfg.guide.append_direction:
-            text_z = self.diffusion.get_text_embeds([ref_text]) # torch.Size([2, 77, 768]) 0: uncond 1: cond
+            text_z = self.diffusion.get_text_embeds([ref_text]) # torch.Size([2, 77, W]) 0: uncond 1: cond
+            # text_z = self.get_text_embeddings([ref_text], use_grad=use_grad)
         else:
             text_z = []
             for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
                 text = f"{ref_text}, {d} view"
                 text_z.append(self.diffusion.get_text_embeds([text]))
+                # text_z.append(self.get_text_embeddings([text], use_grad=use_grad))
+            # import pdb;pdb.set_trace()
         return text_z
 
-    def calc_image_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
-        ref_image = self.cfg.guide.image
-        image_z, image = self.diffusion.get_image_embeds(ref_image)
-        return image_z, image[None]
-    
+    def ref_image_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
+        return self.clip_image_embeddings(Image.open(self.cfg.guide.image))
+        # ref_image = self.cfg.guide.image
+        # import pdb;pdb.set_trace()
+        # image_z, image = self.diffusion.get_image_embeds(ref_image)
+        # return image_z, image[None]
+        
+    ### depricated ######################################################################################
     # reference image embeding for CLIP loss (use it from paint-by-example)
     def get_image_embedding(self):
         with torch.no_grad():
@@ -221,6 +220,52 @@ class Trainer:
             ref_image_embeds = ref_image_embeds / ref_image_embeds.norm(p=2, dim=-1, keepdim=True)
         return ref_image_embeds.detach()
     ### depricated ######################################################################################
+    
+    
+    # grad flow!
+    def encode_text_embedding(self, tkn):
+        """
+        Args:
+            tkn (torch.tensor): [B, 77] text token
+        Return:
+            x (torch.tensor): [B, 77, W] text embeddings [batch_size, n_ctx, transformer.width:(ViT-B/32) / 768 (ViT-L/14)]
+        """        
+        x = self.clip_model.token_embedding(tkn).type(self.clip_model.dtype)  # [batch_size, n_ctx, d_model]
+        x = x + self.clip_model.positional_embedding.type(self.clip_model.dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.clip_model.transformer(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        # x = self.clip_model.ln_final(x).type(self.clip_model.dtype)
+        x = self.clip_model.ln_final(x).type(self.diffusion.unet.dtype) # match type
+        # print(x.shape)
+        return x
+    
+    def _get_text_embeddings(self, text):
+        text_ = clip.tokenize(text).to(self.device)
+        text_embedding = self.encode_text_embedding(text_)
+        
+        uncond = clip.tokenize([''] * len(text)).to(self.device)
+        uncond_embedding = self.encode_text_embedding(uncond)
+        
+        text_embeddings = torch.cat([uncond_embedding, text_embedding])
+        return text_embeddings
+
+    def get_text_embeddings(self, text, use_grad=False):
+        if use_grad:
+            return self._get_text_embeddings(text)
+        else:
+            with torch.no_grad():
+                return self._get_text_embeddings(text)        
+        
+    def pooled_text_feature(self, ftr, tkn):
+        """
+        Args:
+            ftr (torch.tensor): [B, 77, W] text feature [batch_size, n_ctx, transformer.width:(ViT-B/32) / 768 (ViT-L/14)]
+            tkn (torch.tensor): [B, 77] text token
+        Return:
+            pooled feature; take features from the eot embedding (eot_token is the highest number in each sequence)
+        """
+        return ftr[torch.arange(ftr.shape[0]), tkn.argmax(dim=-1)] @ self.clip_model.text_projection
     
 
     def get_image(self) -> torch.Tensor:
@@ -283,8 +328,10 @@ class Trainer:
 
         ### TODO:
         ## 1. optimize text_x that best represents the image using CLIP CosSim loss
-        image_text_z = self.diffusion.optimize_text_token([self.cfg.guide.text], self.image_z, self.image, max_itr=100)
-        import pdb;pdb.set_trace()
+        # image_text_z = self.diffusion.optimize_text_token([self.cfg.guide.text], self.image_z, self.image, max_itr=100)
+        # if self.cfg.optim.use_opt_txt:
+        #     self.text_z = self.diffusion.optimize_text_token(self.text_z, self.image_z, max_itr=100)
+        # import pdb;pdb.set_trace()
         ## 2. use Paint-by-Example
 
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
@@ -490,7 +537,7 @@ class Trainer:
             else:
                 text_z = self.text_z
             #### need to replace it SDedit ##################################################################
-            diff_rgb = self.diffusion.train_step(text_z, pred_rgb) # noisy image
+            diff_rgb = self.diffusion.train_step(text_z, pred_rgb) # noisy image ?
             #### need to replace it SDedit ##################################################################
         else:
             # diff_rgb = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image, self.ref_image_tensor, 
@@ -518,8 +565,12 @@ class Trainer:
         # problem :: CLIP loss does not properly backprop to texture map
         # with torch.autograd.set_detect_anomaly(True):
         if use_clip:
-            out_image_embeds = self.clip_image_embeddings_grad(diff_rgb)
-            ref_image_embeds = self.ref_image_embeds
+            out_image_embeds = self.clip_image_embeddings(diff_rgb, use_grad=True)
+            
+            # Normalize features
+            out_image_embeds = out_image_embeds / out_image_embeds.norm(dim=-1, keepdim=True)
+            ref_image_embeds = self.ref_image_embeds / self.ref_image_embeds.norm(dim=-1, keepdim=True)
+            
             loss_guidance = self.criterionCLIP(out_image_embeds, ref_image_embeds) * 10
         else:
             ### Pixel-wise Loss
