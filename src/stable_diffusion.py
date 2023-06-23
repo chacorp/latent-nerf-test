@@ -75,15 +75,12 @@ class StableDiffusion(nn.Module):
         # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
         self.model_id = "openai/clip-vit-large-patch14"
         self.tokenizer = CLIPTokenizer.from_pretrained(self.model_id)
-        # self.text_encoder = CLIPTextModel.from_pretrained(self.model_id).to(self.device)
+        self.text_encoder = CLIPTextModel.from_pretrained(self.model_id).to(self.device)
         # self.image_encoder = None
-        # self.image_processor = None
-        
-        self.text_encoder  = CLIPTextModelWithProjection.from_pretrained(self.model_id).to(self.device)
-        # self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.model_id).to(self.device)
-        
+        # self.image_processor = None        
         # self.image_processor = AutoProcessor.from_pretrained(self.model_id)
         # self.clipmodel       = CLIPModel.from_pretrained(self.model_id).to(self.device)
+        
         self.criterionCLIP   = torch.nn.CosineSimilarity(dim=1, eps=1e-15)
         self.criterionL1     = torch.nn.L1Loss()
         
@@ -209,7 +206,20 @@ class StableDiffusion(nn.Module):
             image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
         return image_features, self.transform(image)
     
-    def optimize_text_token(self, prompt, image_features, image, max_itr=100):
+    def optimize_text_token(self, prompt, image_features, max_itr=100):
+        """
+        Args:
+            prompt (str): initial text prompt
+            image_features ()
+        Return:
+            text_optimized
+        """
+        view_text_z = []
+        for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
+            text = f"{d} view"
+            view_text_z.append(self.diffusion.get_text_embeds([text]))
+        import pdb;pdb.set_trace()
+        
         with torch.no_grad():
             # txt -> token -> txt embed (hidden)
             text_input = self.tokenizer(
@@ -359,8 +369,8 @@ class StableDiffusion(nn.Module):
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
         # w(t), alpha_t * sigma_t^2
-        # w = (1 - self.alphas[t])
-        w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
+        w = (1 - self.alphas[t])
+        # w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
         grad = w * (noise_pred - noise)
 
         # clip grad for stable training?

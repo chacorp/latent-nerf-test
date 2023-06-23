@@ -155,6 +155,21 @@ class PaintbyExample(nn.Module):
         return text_embeddings
 
 
+    def get_image_embeds(self, image_path):
+        if type(image_path) == str:
+            image = Image.open(image_path)
+        else:
+            image = image_path
+            
+        image_inputs = self.image_processor(
+                images=image, 
+                return_tensors="pt"
+            )        
+        with torch.no_grad():
+            image_features = self.clipmodel.get_image_features(image_inputs.pixel_values.to(self.device))
+            image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
+        return image_features, self.transform(image)
+    
     def _encode_image(self, image, num_images_per_prompt=1):
         if not isinstance(image, torch.Tensor):
             image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
