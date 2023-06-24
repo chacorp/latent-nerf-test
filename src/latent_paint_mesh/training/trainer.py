@@ -192,14 +192,14 @@ class Trainer:
         # does not work with openAI clip -> why?
             
         if not self.cfg.guide.append_direction:
-            text_z = self.diffusion.get_text_embeds([ref_text]) # torch.Size([2, 77, W]) 0: uncond 1: cond
-            # text_z = self.get_text_embeddings([ref_text], use_grad=use_grad)
+            # text_z = self.diffusion.get_text_embeds([ref_text]) # torch.Size([2, 77, W]) 0: uncond 1: cond
+            text_z = self.get_text_embeddings([ref_text], use_grad=use_grad)
         else:
             text_z = []
             for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
                 text = f"{ref_text}, {d} view"
-                text_z.append(self.diffusion.get_text_embeds([text]))
-                # text_z.append(self.get_text_embeddings([text], use_grad=use_grad))
+                # text_z.append(self.diffusion.get_text_embeds([text]))
+                text_z.append(self.get_text_embeddings([text], use_grad=use_grad))
             # import pdb;pdb.set_trace()
         return text_z
 
@@ -652,8 +652,9 @@ class Trainer:
         else:
             pred_rgb = preds.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
         
-        
-        save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
+        log_idx = self.train_step // self.cfg.log.save_interval
+        # save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
+        save_path = self.train_renders_path / f'step_{log_idx:05d}.jpg'
         save_path.parent.mkdir(exist_ok=True)
 
         pred_rgb = tensor2numpy(pred_rgb[0])
