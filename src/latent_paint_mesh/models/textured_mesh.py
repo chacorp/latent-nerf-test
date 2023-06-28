@@ -188,23 +188,25 @@ class TexturedMeshModel(nn.Module):
             fp.write(f'Ns 0.000000 \n')
             fp.write(f'map_Kd {name}albedo.png \n')
 
-    def render(self, theta, phi, radius, decode_func=None, test=False, dims=None, ref_view=False):
+    def render(self, theta, phi, radius, decode_func=None, test=False, dims=None, use_decode=False):
         if test:
             return self.render_test(theta, phi, radius, decode_func, dims=dims)
         else:
-            if ref_view:
-                return self.render_train_ref_view(theta, phi, radius, decode_func, dims=dims)
+            if use_decode:
+                return self.render_train_with_decode(theta, phi, radius, decode_func, dims=dims)
             else:
                 return self.render_train(theta, phi, radius)
 
     def render_train(self, theta, phi, radius):
         if self.latent_mode:
             texture_img = self.texture_img
-            background_sphere_colors = self.background_sphere_colors
+            # background_sphere_colors = self.background_sphere_colors
         else:
             texture_img = self.texture_img_rgb_finetune
-            background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
-            
+            # torch.autograd.set_detect_anomaly(True)
+            # background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
+        # import pdb; pdb.set_trace()
+        
         # add displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
@@ -215,24 +217,23 @@ class TexturedMeshModel(nn.Module):
                                                                        radius         = radius,
                                                                        look_at_height = self.dy,
                                                                        disp           = self.displacement)
-
-        pred_back, _ = self.renderer.render_single_view(self.env_sphere,
-                                                        background_sphere_colors,
-                                                        elev           = theta,
-                                                        azim           = phi,
-                                                        radius         = radius,
-                                                        look_at_height = self.dy)
-        mask = mask.detach()
-        pred_map = pred_back * (1 - mask) + pred_features * mask
-        # import pdb; pdb.set_trace()
+        # pred_back, _ = self.renderer.render_single_view(self.env_sphere,
+        #                                                 background_sphere_colors,
+        #                                                 elev           = theta,
+        #                                                 azim           = phi,
+        #                                                 radius         = radius,
+        #                                                 look_at_height = self.dy)
+        # mask = mask.detach()
+        # pred_map = pred_back * (1 - mask) + pred_features * mask
+        
         # from torchvision.transforms import ToPILImage
         # ToPILImage()(pred_features[0]).save('tm.png')
         
         if self.latent_mode and mask.shape[-1] != 64:
             mask          = F.interpolate(mask, (64, 64), mode='bicubic')
-            pred_back     = F.interpolate(pred_back, (64, 64), mode='bicubic')
             pred_features = F.interpolate(pred_features, (64, 64), mode='bicubic')
-            pred_map      = F.interpolate(pred_map, (64, 64), mode='bicubic')
+            # pred_back     = F.interpolate(pred_back, (64, 64), mode='bicubic')
+            # pred_map      = F.interpolate(pred_map, (64, 64), mode='bicubic')
             
         ## laplacian smoothing
         ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
@@ -247,7 +248,8 @@ class TexturedMeshModel(nn.Module):
         lap_loss = lap_loss.sum()
         # import pdb;pdb.set_trace()
         
-        return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features, 'lap_loss': lap_loss}
+        # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features, 'lap_loss': lap_loss}
+        return {'image': pred_features, 'mask': mask, 'lap_loss': lap_loss}
         # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features}
 
     def render_test(self, theta, phi, radius, decode_func=None, dims=None):
@@ -272,7 +274,7 @@ class TexturedMeshModel(nn.Module):
 
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask}
     
-    def render_train_ref_view(self, theta, phi, radius, decode_func=None, dims=None):
+    def render_train_with_decode(self, theta, phi, radius, decode_func=None, dims=None):
         if self.latent_mode:
             assert decode_func is not None, 'decode function was not supplied to decode the latent texture image'
             texture_img = decode_func(self.texture_img)
@@ -280,7 +282,7 @@ class TexturedMeshModel(nn.Module):
         else:
             texture_img = self.texture_img_rgb_finetune
             background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
-        # import pdb;pdb.set_trace()
+        
         # pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,self.mesh.faces,self.face_attributes,texture_img,elev=theta,azim=phi,radius=radius,look_at_height=self.dy,dims=dims,white_background=True,disp=self.displacement)
         # add displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
