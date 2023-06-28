@@ -58,20 +58,15 @@ class Trainer:
         self.text_z             = self.ref_text_embeddings()
         # self.image_z            = self.calc_image_embeddings()
         # self.image_z, self.image= self.calc_image_embeddings()
-        self.image_z            = self.ref_image_embeddings()
+        # self.image_z            = self.ref_image_embeddings()
         
         self.optimizer          = self.init_optimizer()
         self.dataloaders        = self.init_dataloaders()
         self.transform          = self.get_transform()
         
         ### reference image
-        self.ref_image, self.ref_image_tensor = self.get_image()
-        self.ref_image_embeds = self.clip_image_embeddings(self.ref_image)
-        # if self.cfg.optim.use_SD:
-        #     # self.ref_image_embeds, _ = self.calc_image_embeddings()
-        #     self.ref_image_embeds = self.clip_image_embeddings(self.ref_image)
-        # else:
-        #     self.ref_image_embeds   = self.get_image_embedding()
+        self.ref_image, self.ref_image_tensor, self.ref_image_embeds = self.get_image()
+        
         self.ref_pose           = self.get_reference_pose()
         self.criterionL1        = nn.L1Loss()
         self.criterionL2        = nn.MSELoss()
@@ -162,17 +157,17 @@ class Trainer:
         """
         # Prepare the inputs (convert PIL.Image to torch.Tensor)
         if type(image) == torch.Tensor:
-            image = F.interpolate(image, (224, 224), mode='bilinear')
+            if image.shape[-1] != 224:
+                image = F.interpolate(image, (224, 224), mode='bilinear')
             image_input = self.normalize_clip(image)
         else:
             image_input = self.clip_preprocess(image).unsqueeze(0).to(self.device)
 
         # Calculate features
-        with torch.no_grad():
-            image_features = self.clip_model.encode_image(image_input)
+        image_features = self.clip_model.encode_image(image_input)
         
         # Normalize features
-        # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features
     
     def clip_image_embeddings(self, image, use_grad=False):
@@ -202,25 +197,6 @@ class Trainer:
                 text_z.append(self.get_text_embeddings([text], use_grad=use_grad))
             # import pdb;pdb.set_trace()
         return text_z
-
-    def ref_image_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
-        return self.clip_image_embeddings(Image.open(self.cfg.guide.image))
-        # ref_image = self.cfg.guide.image
-        # import pdb;pdb.set_trace()
-        # image_z, image = self.diffusion.get_image_embeds(ref_image)
-        # return image_z, image[None]
-        
-    ### depricated ######################################################################################
-    # reference image embeding for CLIP loss (use it from paint-by-example)
-    def get_image_embedding(self):
-        with torch.no_grad():
-            ref_img = self.diffusion.feature_extractor(images=self.ref_image, return_tensors="pt").pixel_values
-            ref_image_embeds = self.diffusion.image_encoder(ref_img.to(self.device))
-            ref_image_embeds = ref_image_embeds.squeeze(1)
-            ref_image_embeds = ref_image_embeds / ref_image_embeds.norm(p=2, dim=-1, keepdim=True)
-        return ref_image_embeds.detach()
-    ### depricated ######################################################################################
-    
     
     # grad flow!
     def encode_text_embedding(self, tkn):
@@ -270,8 +246,9 @@ class Trainer:
 
     def get_image(self) -> torch.Tensor:
         image = Image.open(self.cfg.guide.image)
+        image_embeds = self.clip_image_embeddings(image)
         # return self.transform(image)
-        return image, self.transform(image).to(self.device)
+        return image, self.transform(image)[None].to(self.device), image_embeds
     
     def get_transform(self):
         return  transforms.Compose([
@@ -320,6 +297,97 @@ class Trainer:
         logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True, format=log_format)
         logger.add(self.exp_path / 'log.txt', colorize=False, format=log_format)
 
+
+    def optimize_text_token(self, prompt, image_features, max_itr=100):
+        """
+        Args:
+            prompt (str): initial text prompt
+            image_features ()
+        Return:
+            text_optimized
+        """
+        view_text_z = []
+        for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
+            text = f"{d} view"
+            view_text_z.append(self.diffusion.get_text_embeds([text]))
+        
+        with torch.no_grad():
+            # txt -> token -> txt embed (hidden)
+            text_input = self.tokenizer(
+                prompt, 
+                padding='max_length', 
+                max_length=self.tokenizer.model_max_length, 
+                truncation=True, 
+                return_tensors='pt'
+            ).to(self.device)
+            # text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length, truncation=True, return_tensors='pt').to(self.device)
+            text_embeddings = self.clipmodel.text_model(text_input.input_ids.to(self.device))[0]
+            
+            uncond_input = self.tokenizer(
+                [''] * len(prompt), 
+                padding='max_length', 
+                max_length=self.tokenizer.model_max_length, 
+                return_tensors='pt')
+
+            uncond_embeddings = self.clipmodel.text_model(uncond_input.input_ids.to(self.device))[0]
+            
+            ## normalized image feature
+            image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
+        text_embeddings.requires_grad = True
+        
+        # image  = Image.open("/source/kseo/diffusion_playground/latent-nerf-test/data/monster_ball.jpg")
+        # prompt = "pokemon, monster ball, red and white color, on a grass"
+        # inputs = self.image_processor(text=[prompt], images=image, return_tensors="pt", padding=True)
+        # outputs = self.clipmodel(**inputs.to(self.device))
+        
+        itr = 0
+        save_itr = max_itr // 5
+        # max_itr = 100
+        pbar = tqdm(total=max_itr, initial=itr)
+        optimizer = torch.optim.Adam([text_embeddings], lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
+        # scheduler = torch.optim.lr_scheduler.LambdaLR(
+        #     optimizer=optimizer,
+        #     lr_lambda=lambda epoch: 0.95 ** epoch,
+        #     last_epoch=-1,
+        #     verbose=False)
+
+        text_optimized = None
+        prev_loss = 100
+        while itr < max_itr:
+            itr += 1
+            pbar.update(1)
+            
+            optimizer.zero_grad()            
+            # txt embed (hidden) -> txt feature
+            pooled_output = text_embeddings[
+                torch.arange(text_embeddings.shape[0], device=self.device),
+                text_input.input_ids.to(dtype=torch.int, device=self.device).argmax(dim=-1),
+            ]
+            text_features = self.clipmodel.text_projection(pooled_output)[0]
+                
+            # normalized text features
+            text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
+
+            ## cosine similarity
+            loss = 1.0 - self.criterionCLIP(text_features, image_features.detach())
+            
+            loss.backward()
+            optimizer.step()
+            
+            # pbar.set_description("prev: {:06f} loss: {:06f} ".format(prev_loss, loss.item()))
+            pbar.set_description("loss: {:06f} ".format(loss.item()))
+            
+            if loss < prev_loss:
+                prev_loss      = loss.item()
+                text_optimized = text_embeddings.detach().clone()
+                
+            if itr % save_itr == 0 or itr == max_itr:
+                img = self.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_embeddings]))                
+                Image.fromarray(img[0]).save('test_{:03}.png'.format(itr))
+                img = self.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_optimized]))
+                Image.fromarray(img[0]).save('best.png')
+        return text_optimized
+    
     def train(self):
         logger.info('Starting training ^_^')
         # Evaluate the initialization
@@ -328,7 +396,7 @@ class Trainer:
 
         ### TODO:
         ## 1. optimize text_x that best represents the image using CLIP CosSim loss
-        # image_text_z = self.diffusion.optimize_text_token([self.cfg.guide.text], self.image_z, self.image, max_itr=100)
+        image_text_z = self.optimize_text_token([self.cfg.guide.text], self.image_z, self.ref_image_embeds, max_itr=100)
         # if self.cfg.optim.use_opt_txt:
         #     self.text_z = self.diffusion.optimize_text_token(self.text_z, self.image_z, max_itr=100)
         # import pdb;pdb.set_trace()
@@ -362,11 +430,9 @@ class Trainer:
                 # data['image_z'] = self.image_z
                 # pred_rgbs, loss = self.train_render(data)
                 
-                # reconstruction = self.train_step % 10 == 1
-                # reconstruction = self.train_step % 10 == 1
-                # reconstruction = np.random.uniform(0, 1) < 0.5
-                # reconstruction = True
-                reconstruction = False
+                # CLIPD = self.train_step % 10 == 1
+                # CLIPD = np.random.uniform(0, 1) < 0.5
+                CLIPD = True
                 
                 use_clip = True
                 log = np.random.uniform(0, 1) < 0.05
@@ -380,40 +446,17 @@ class Trainer:
                     # use_clip = False
                     pred_rgbs, lap_loss, loss_guidance     = self.train_render_clip(data, use_clip=use_clip, log=log)
                 else:
-                    if reconstruction:
-                        ### Image Reconstruction loss
-                        descrition += "step 2: "
-                        # use_clip = np.random.uniform(0, 1) < 0.5
+                    if CLIPD:
+                        # code reference: https://github.com/junshutang/Make-It-3D
+                        ### SDS + CLIP-D 
+                        descrition += "type 2: "
                         pred_rgbs, lap_loss, loss_guidance = self.train_render_clip(data, use_clip=use_clip, log=log)
                     else:
-                        ### Score Distillation Sampling
-                        descrition += "step 3: "
+                        ### Score Distillation Sampling only
+                        descrition += "type 3: "
                         pred_rgbs, lap_loss, loss_guidance = self.train_render_text(data)
-                # sds_grad = self.mesh_model.displacement.grad
-                
                 self.optimizer.step()
-                
-                # import pdb;pdb.set_trace()
-                # optim_step = int(50 * 10.**(-self.train_step*5e-05)+1)
-                
-                # if self.train_step % optim_step == 0:
-                                
-                # ========= use optim_step =========
-                # next_optim_step = optim_step + prev_optim_step
-                # if self.train_step >= next_optim_step:
-                #     prev_optim_step = next_optim_step
-                #     lap_loss =  10. ** 4 * lap_loss #/ (1 + step_weight)
 
-                #     ## Offset regularization
-                #     # reg_loss = self.mesh_model.displacement.norm(dim=1).mean()
-                #     reg_loss = torch.mean(torch.mean(self.mesh_model.displacement[None]**2, axis=1), axis=1)
-                #     reg_loss = 10. ** self.cfg.optim.reg_weight * reg_loss # / (1 + (step_weight))
-                    
-                #     loss = lap_loss + reg_loss
-                #     loss.backward()
-                #     ## optimize displacement interval
-                #     self.optimizer_disp.step()
-                
                 
                 # lap_loss = (lap_loss * laplacian_weight)
                 # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L30
@@ -421,7 +464,6 @@ class Trainer:
 
                 ## Offset regularization
                 ## ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L31
-                # reg_loss = self.mesh_model.displacement.norm(dim=1).mean()
                 reg_loss = torch.mean(torch.mean(self.mesh_model.displacement[None]**2, axis=1), axis=1)
                 reg_loss = 10. ** self.cfg.optim.reg_weight * reg_loss # / (1 + (step_weight))
                 
@@ -433,13 +475,11 @@ class Trainer:
                 new_disp = torch.mean(self.mesh_model.displacement)
                 descrition += "disp:{:05f} ".format(new_disp)                
                 descrition += "lap: {:05f} reg:{:05f} ".format(lap_loss.item(), reg_loss.item())
-                if use_clip and reconstruction:
-                    descrition += "clip:{:05f} ".format(loss_guidance.item())
+                if use_clip and CLIPD:
+                    descrition += "clip:{:05f}".format(loss_guidance.item())
                     
                 # ========= use optim_step =========
                 # descrition += "disp:{:06f} disp_step:{}".format(new_disp, next_optim_step)
-                # if self.train_step % optim_step == 0:
-                #     descrition += " lap: {:06f} reg:{:06f}".format(lap_loss.item(), reg_loss.item())
                 
                 pbar.set_description(descrition)
 
@@ -450,7 +490,8 @@ class Trainer:
                     step_weight +=1
 
                 # if np.random.uniform(0, 1) < 0.05:
-                if log and not reconstruction:
+                # if log and not CLIPD:
+                if log:
                     # not pixelwise loss :: 'pred_rgbs' should be latent (4 channel)
                     # Randomly log rendered images throughout the training
                     self.log_train_renders(pred_rgbs)
@@ -464,7 +505,8 @@ class Trainer:
         logger.info(f'Evaluating and saving model, iteration #{self.train_step}...')
         self.mesh_model.eval()
         save_path.mkdir(exist_ok=True)
-
+        
+        log_idx = self.train_step // self.cfg.log.save_interval
         if save_as_video:
             all_preds = []
         for i, data in enumerate(dataloader):
@@ -475,11 +517,14 @@ class Trainer:
             if save_as_video:
                 all_preds.append(pred)
             else:
-                Image.fromarray(pred).save(save_path / f"step_{self.train_step:05d}_{i:04d}_rgb.png")
+                # Image.fromarray(pred).save(save_path / f"step_{self.train_step:05d}_{i:04d}_rgb.png")
+                Image.fromarray(pred).save(save_path / f"step_{log_idx:05d}_{i:04d}_rgb.png")
 
         # Texture map is the same, so just take the last result
         texture = tensor2numpy(textures[0])
-        Image.fromarray(texture).save(save_path / f"step_{self.train_step:05d}_texture.png")
+        
+        # Image.fromarray(texture).save(save_path / f"step_{self.train_step:05d}_texture.png")
+        Image.fromarray(texture).save(save_path / f"step_{log_idx:05d}_texture.png")
 
         if save_as_video:
             all_preds = np.stack(all_preds, axis=0)
@@ -513,87 +558,37 @@ class Trainer:
             theta       = self.ref_pose['theta']
             phi         = self.ref_pose['phi']
             radius      = self.ref_pose['radius']
-        dim             = self.cfg.render.eval_grid_size
         
         ## render latent
         outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
-        ## render image
-        # outputs2  = self.mesh_model.render(theta=theta, phi=phi, radius=radius,
-        #     decode_func = self.diffusion.decode_latents_grad,
-        #     dims        = (dim, dim), 
-        #     ref_view    = True)
         
-        ## rendered w/ current texture
         pred_rgb        = outputs['image']      # [B, 3, H, W]
         pred_rgb_mask   = outputs['mask']       # [B, 1, H, W]
         lap_loss        = outputs['lap_loss']
         
-        # pred_rgb_l      = outputs_l['image']
-        if self.cfg.optim.use_SD:
-            # # text embeddings
-            if self.cfg.guide.append_direction:
-                dirs = data['dir']  # [B,]
-                text_z = self.text_z[dirs]
-            else:
-                text_z = self.text_z
-            #### need to replace it SDedit ##################################################################
-            diff_rgb = self.diffusion.train_step(text_z, pred_rgb) # noisy image ?
-            #### need to replace it SDedit ##################################################################
+        
+        if self.cfg.guide.append_direction:
+            dirs = data['dir']  # [B,]
+            text_z = self.text_z[dirs]
         else:
-            # diff_rgb = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image, self.ref_image_tensor, 
-            #                                      use_clip=use_clip)
-            diff_rgb = self.diffusion.lantent_forward(pred_rgb, pred_rgb_mask, self.ref_image, 25, rand_latent=False)
-            # diff_rgb2 = self.diffusion.lantent_forward(pred_rgb, pred_rgb_mask, self.ref_image, 25, rand_latent=False)
-            # rand_rgb = torch.randn_like(pred_rgb, device=self.device)
-            
-            # transforms.ToPILImage()(((pred_rgb[0])*pred_rgb_mask[0])[:3]).save('test.png') # latent 
-            # import pdb;pdb.set_trace()
-            # _rgb_mask = F.interpolate(pred_rgb_mask, (512, 512), mode='bilinear', align_corners=False)
-            # transforms.ToPILImage()((diff_rgb[0])*pred_rgb_mask[0]).save('test.png')
-            # transforms.ToPILImage()(diff_rgb[0]).save('test.png')
-            # transforms.ToPILImage()(diff_rgb20]).save('test.png')
-            
-            # transforms.ToPILImage()(pred_rgb[0]).save('test.png')
-            # transforms.ToPILImage()(rand_rgb[0]).save('test.png')
-            
-            # transforms.ToPILImage()((diff_rgb[0]*0.5 + 0.5)*_rgb_mask).save('test.png')
-            # transforms.ToPILImage()((pred_rgb[0]*0.5 + 0.5)*pred_rgb_mask[0]).save('test.png')
-            # import pdb;pdb.set_trace()
+            text_z = self.text_z
         
-        ### TODO
-        ## make CLIP loss
-        # problem :: CLIP loss does not properly backprop to texture map
-        # with torch.autograd.set_detect_anomaly(True):
-        if use_clip:
-            out_image_embeds = self.clip_image_embeddings(diff_rgb, use_grad=True)
-            
-            # Normalize features
-            out_image_embeds = out_image_embeds / out_image_embeds.norm(dim=-1, keepdim=True)
-            ref_image_embeds = self.ref_image_embeds / self.ref_image_embeds.norm(dim=-1, keepdim=True)
-            
-            loss_guidance = self.criterionCLIP(out_image_embeds, ref_image_embeds) * 10
-        else:
-            ### Pixel-wise Loss
-            ref_image = self.ref_image_tensor.detach()[None]
-            loss_guidance = self.criterionL1(ref_image, pred_rgb) #* self.cfg.optim.lambda_pixelwise
-            # loss_guidance = self.criterionL1(ref_image[None], pred_rgb) + self.criterionL2(ref_image[None], pred_rgb)
-            # loss_guidance = self.criterionL1(ref_image*pred_rgb_mask, pred_rgb*pred_rgb_mask) #* self.cfg.optim.lambda_pixelwise
+        # import pdb;pdb.set_trace()
+        imgs          = self.diffusion.decode_latents_grad(pred_rgb)  
+        image_embeds    = self.clip_image_embeddings(imgs, use_grad=True)
+        # out_embeds    = out_embeds / out_embeds.norm(dim=-1, keepdim=True)
+        # ref_embeds    = self.ref_image_embeds / self.ref_image_embeds.norm(dim=-1, keepdim=True)
+        loss_guidance = -(image_embeds * self.ref_image_embeds).sum(-1).mean()
+        loss_guidance.backward(retain_graph=True)
         
-        if log:
-            save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
-            # transforms.ToPILImage()(pred_rgb[0]*0.5 + 0.5).save(save_path)
-            transforms.ToPILImage()(diff_rgb[0]*0.5 + 0.5).save(save_path)
-            
-        # import pdb; pdb.set_trace()
-        # image_inputs = self.diffusion.image_processor(images=pred_rgb[0], return_tensors="pt").pixel_values
-        # loss_guidance.backward()
+        # loss_guidance = self.diffusion.train_step(
+        #     text_z, 
+        #     pred_rgb, 
+        #     self.ref_image_tensor,
+        #     use_clip=True, 
+        #     clip_model=self.clip_model
+        #     )
         
-        # self.mesh_model.texture_img.norm()
-        # self.mesh_model.texture_img = self.mesh_model.texture_img.detach()
-        # self.mesh_model.texture_img.requires_grad_(True)
-        
-        # loss_guidance = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image)
-        # return pred_rgb, loss
         return pred_rgb, lap_loss, loss_guidance
 
     def train_render_text(self, data: Dict[str, Any]):
@@ -608,27 +603,16 @@ class Trainer:
         pred_rgb        = outputs['image']      # [B, 3, H, W]
         pred_rgb_mask   = outputs['mask']       # [B, 1, H, W]
         lap_loss        = outputs['lap_loss']
-        
-        # import pdb;pdb.set_trace()
         # pred_back = outputs['background']
-        # print('{}'.format(pred_back[0,0,0]))
         
         # Guidance loss
-        if self.cfg.optim.use_SD:
-            # # text embeddings
-            if self.cfg.guide.append_direction:
-                dirs = data['dir']  # [B,]
-                text_z = self.text_z[dirs]
-            else:
-                text_z = self.text_z
-            # import pdb;pdb.set_trace()
-            # loss_guidance = self.diffusion.train_step(text_z, pred_rgb, self.ref_image)
-            loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
+        if self.cfg.guide.append_direction:
+            dirs = data['dir']  # [B,]
+            text_z = self.text_z[dirs]
         else:
-            loss_guidance = self.diffusion.train_step(pred_rgb, pred_rgb_mask, self.ref_image)
-        # loss = loss_guidance # dummy
+            text_z = self.text_z
+        loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
 
-        # return pred_rgb, loss
         return pred_rgb, lap_loss, loss_guidance
 
     def eval_render(self, data):
@@ -652,9 +636,8 @@ class Trainer:
         else:
             pred_rgb = preds.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
         
-        log_idx = self.train_step // self.cfg.log.save_interval
-        # save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
-        save_path = self.train_renders_path / f'step_{log_idx:05d}.jpg'
+        save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
+        # save_path = self.train_renders_path / f'step_{log_idx:05d}.jpg'
         save_path.parent.mkdir(exist_ok=True)
 
         pred_rgb = tensor2numpy(pred_rgb[0])
