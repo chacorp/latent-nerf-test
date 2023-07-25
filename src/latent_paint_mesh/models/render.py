@@ -9,7 +9,9 @@ class Renderer:
                  device, 
                  dim=(224, 224), 
                  interpolation_mode='nearest',
-                 lights=torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                 lights=torch.tensor([1.0, 1.0, 1.0, 
+                                      1.0, 0.0, 0.0, 
+                                      0.0, 0.0, 0.0]),
                  ):
         assert interpolation_mode in ['nearest', 'bilinear', 'bicubic'], f'no interpolation mode {interpolation_mode}'
 
@@ -136,3 +138,53 @@ class Renderer:
         if white_background:
             image += 1 * (1 - mask)
         return image.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2)
+
+    def render_single_view_texture_lighting(self, verts, faces, uv_face_attr, texture_map, elev=0, azim=0, radius=2,
+                                   look_at_height=0.0, dims=None, white_background=False, disp=None):
+        dims = self.dim if dims is None else dims
+        
+        ### Add displacement
+        if disp != None:
+            verts = verts + disp
+        
+        camera_transform = self.get_camera_from_view(
+                torch.tensor(elev), 
+                torch.tensor(azim), 
+                r=radius,
+                look_at_height=look_at_height
+            ).to(self.device)
+        
+        face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
+            verts.to(self.device), faces.to(self.device), self.camera_projection, camera_transform=camera_transform)
+        
+        # ### Perform Rasterization ###
+        # Construct attributes that DIB-R rasterizer will interpolate.
+        # the first is the UVS associated to each face
+        # the second will make a hard segmentation mask
+        face_attributes = [
+            uv_face_attr,
+            torch.ones((1, faces.shape[0], 3, 1), device='cuda')
+        ]
+    
+        # If you have nvdiffrast installed you can change rast_backend to
+        # nvdiffrast or nvdiffrast_fwd 
+        image_features, soft_mask, face_idx = kal.render.mesh.dibr_rasterization(
+            dims[1], dims[0], face_vertices_camera[:, :, :, -1],
+            face_vertices_image, face_attributes, face_normals[:, :, -1],
+            rast_backend='cuda')
+            
+        # image_features is a tuple in composed of the interpolated attributes of face_attributes
+        texture_coords, mask = image_features
+        # image = kal.render.mesh.texture_mapping(texture_coords, texture_map.repeat(1, 1, 1, 1), mode='bilinear')
+        # image = image * mask
+        
+        ## Lighting
+        # https://github.com/threedle/text2mesh/blob/37d1c8491104b78ee55cd54cd09ab24cb1427714/render.py#L278
+        image_normals = face_normals[:, face_idx].squeeze(0)
+        image_lighting = kal.render.mesh.spherical_harmonic_lighting(image_normals, self.lights).unsqueeze(0)
+        
+        C = image_normals.shape[-1] # [1, 512, 512, 3]
+        image_lighting = image_lighting.repeat(1, C, 1, 1).permute(0, 2, 3, 1).to(self.device)
+        image_lighting = image_lighting.clamp(0, 1)
+        
+        return image_lighting.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2)
