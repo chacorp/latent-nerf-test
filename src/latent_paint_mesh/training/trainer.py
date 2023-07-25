@@ -90,12 +90,10 @@ class Trainer:
 
     def init_mesh_model(self) -> nn.Module:
         if self.cfg.render.backbone == 'texture-mesh':
-            # from src.latent_paint.models.textured_mesh import TexturedMeshModel
             from src.latent_paint_mesh.models.textured_mesh import TexturedMeshModel
             model = TexturedMeshModel(self.cfg, device=self.device, render_grid_size=self.cfg.render.train_grid_size,
                                       latent_mode=True, texture_resolution=self.cfg.guide.texture_resolution).to(self.device)
         elif self.cfg.render.backbone == 'texture-rgb-mesh':
-            # from src.latent_paint.models.textured_mesh import TexturedMeshModel
             from src.latent_paint_mesh.models.textured_mesh import TexturedMeshModel
             model = TexturedMeshModel(self.cfg, device=self.device, render_grid_size=self.cfg.render.train_grid_size,
                                       latent_mode=False, texture_resolution=self.cfg.guide.texture_resolution).to(self.device)
@@ -116,10 +114,7 @@ class Trainer:
             CACHE_DIR = "/source/kseo/huggingface_cache"
             diffusion_model = StableDiffusion(
                     self.device, 
-                    # model_name   = self.cfg.guide.diffusion_name,
-                    # concept_name = self.cfg.guide.concept_name,
                     model_name   = MODEL_NAME,
-                    # cache_dir    = CACHE_DIR,
                     latent_mode  = self.mesh_model.latent_mode,
                 )
         else:
@@ -490,7 +485,6 @@ class Trainer:
         # import pdb;pdb.set_trace()
         
         ## 2. use Paint-by-Example
-
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
                     bar_format='{desc}: {percentage:3.0f}% training step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
         step_weight = 0
@@ -549,7 +543,9 @@ class Trainer:
                 
                 # lap_loss = (lap_loss * laplacian_weight)
                 # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L30
-                lap_loss =  10. ** 4 * lap_loss #/ (1 + step_weight)
+                # lap_loss =  10. ** 4 * lap_loss #/ (1 + self.train_step)
+                lap_loss = self.cfg.optim.lap_weight ** 2 * lap_loss / (1 + self.train_step)
+                # 'lap': lambda cst, it: 2000**2*cst / (1 + it)
 
                 ## Offset regularization
                 ## ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L31
