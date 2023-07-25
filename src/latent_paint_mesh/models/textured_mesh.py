@@ -283,8 +283,6 @@ class TexturedMeshModel(nn.Module):
             texture_img = self.texture_img_rgb_finetune
             background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
         
-        # pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,self.mesh.faces,self.face_attributes,texture_img,elev=theta,azim=phi,radius=radius,look_at_height=self.dy,dims=dims,white_background=True,disp=self.displacement)
-        # add displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
@@ -295,15 +293,34 @@ class TexturedMeshModel(nn.Module):
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
                                                                        disp=self.displacement)
-        # pred_back, _ = self.renderer.render_single_view(self.env_sphere,
-        #                                                 background_sphere_colors,
-        #                                                 elev           = theta,
-        #                                                 azim           = phi,
-        #                                                 radius         = radius,
-        #                                                 look_at_height = self.dy,
-        #                                                 dims           = dims,)
-        # mask = mask.detach()
-        # pred_map = pred_back * (1 - mask) + pred_features * mask
+        
+        ## laplacian smoothing
+        ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
+        weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
+        
+        with torch.no_grad():
+            # kal.metrics.mesh.laplacian_loss()
+            L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
+        # lap_loss = L.mm(self.displacement + self.mesh.vertices)
+        lap_loss = L.mm(self.displacement)
+        lap_loss = lap_loss.norm(dim=1) * weights
+        lap_loss = lap_loss.sum()
+        
+        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
+        # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
+    
+    def render_train_with_light(self, theta, phi, radius, dims=None):
+        texture_img = self.texture_img
+        pred_features, mask = self.renderer.render_single_view_texture_lighting(self.mesh.vertices,
+                                                                       self.mesh.faces,
+                                                                       self.face_attributes,
+                                                                       texture_img,
+                                                                       elev=theta,
+                                                                       azim=phi,
+                                                                       radius=radius,
+                                                                       look_at_height=self.dy,
+                                                                       dims=dims,
+                                                                       disp=self.displacement)
         
         ## laplacian smoothing
         ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
