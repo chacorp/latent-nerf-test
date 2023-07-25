@@ -45,24 +45,24 @@ class Trainer:
         self.clip_model, self.clip_preprocess = self.init_clip()
         self.mesh_model         = self.init_mesh_model()
         self.diffusion          = self.init_diffusion()
+        self.optimizer          = self.init_optimizer()
+        self.dataloaders        = self.init_dataloaders()
         
         ### depricated ####################################################################
-        if not self.cfg.optim.use_SD:
-            ## get clip mean & std for normalization
-            self.clip_mean      = torch.tensor(self.diffusion.feature_extractor.image_mean).unsqueeze(-1).unsqueeze(-1).to(self.device)
-            self.clip_std       = torch.tensor(self.diffusion.feature_extractor.image_std).unsqueeze(-1).unsqueeze(-1).to(self.device)
-            self.normalize_clip = lambda x, mu, std: (x - mu) / std
+        # if not self.cfg.optim.use_SD:
+        #     ## get clip mean & std for normalization
+        #     self.clip_mean      = torch.tensor(self.diffusion.feature_extractor.image_mean).unsqueeze(-1).unsqueeze(-1).to(self.device)
+        #     self.clip_std       = torch.tensor(self.diffusion.feature_extractor.image_std).unsqueeze(-1).unsqueeze(-1).to(self.device)
+        #     self.normalize_clip = lambda x, mu, std: (x - mu) / std
         ### depricated ####################################################################
+        
+        self.transform          = self.get_transform()
         
         # self.text_z             = self.calc_text_embeddings()
         self.text_z             = self.ref_text_embeddings()
         # self.image_z            = self.calc_image_embeddings()
         # self.image_z, self.image= self.calc_image_embeddings()
         # self.image_z            = self.ref_image_embeddings()
-        
-        self.optimizer          = self.init_optimizer()
-        self.dataloaders        = self.init_dataloaders()
-        self.transform          = self.get_transform()
         
         ### reference image
         self.ref_image, self.ref_image_tensor, self.ref_image_embeds = self.get_image()
@@ -72,11 +72,10 @@ class Trainer:
         self.criterionL2        = nn.MSELoss()
         self.criterionCLIP      = torch.nn.CosineSimilarity(dim=1, eps=1e-12)
         
-        self.clip_transform = transforms.Compose([
-            transforms.Resize(224, interpolation=Image.BICUBIC),
-            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-        ])
-        self.normalize_clip = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        self.normalize_clip     = transforms.Normalize(
+                (0.48145466, 0.4578275,  0.40821073), 
+                (0.26862954, 0.26130258, 0.27577711)
+            )
         
         ## Optimizer for displacement
         self.optimizer_disp     = self.init_optimizer_disp()
@@ -164,7 +163,8 @@ class Trainer:
             image_input = self.clip_preprocess(image).unsqueeze(0).to(self.device)
 
         # Calculate features
-        image_features = self.clip_model.encode_image(image_input)
+        # image_features = self.clip_model.encode_image(image_input)
+        image_features = self.clip_model.encode_image(image_input).type(self.diffusion.unet.dtype)
         
         # Normalize features
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -204,19 +204,36 @@ class Trainer:
         Args:
             tkn (torch.tensor): [B, 77] text token
         Return:
-            x (torch.tensor): [B, 77, W] text embeddings [batch_size, n_ctx, transformer.width:(ViT-B/32) / 768 (ViT-L/14)]
-        """        
+            x (torch.tensor):   [B, 77, W] text embeddings [batch_size, n_ctx, transformer.width: 512(ViT-B/32) / 768 (ViT-L/14)]
+        """
         x = self.clip_model.token_embedding(tkn).type(self.clip_model.dtype)  # [batch_size, n_ctx, d_model]
         x = x + self.clip_model.positional_embedding.type(self.clip_model.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.clip_model.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        # x = self.clip_model.ln_final(x).type(self.clip_model.dtype)
         x = self.clip_model.ln_final(x).type(self.diffusion.unet.dtype) # match type
+        
+        # x = x[torch.arange(x.shape[0]), tkn.argmax(dim=-1)] @ self.clip_model.text_projection
         # print(x.shape)
         return x
     
+    def pooled_text_feature(self, text_z, tkn):
+        """
+        Args:
+            text_z (torch.tensor): [B, 77, W] text feature [batch_size, n_ctx, transformer.width:(ViT-B/32) / 768 (ViT-L/14)]
+            tkn (torch.tensor): [B, 77] text token
+        Return:
+            pooled feature; take features from the eot embedding (eot_token is the highest number in each sequence)
+        """
+        return text_z[torch.arange(text_z.shape[0]), tkn.argmax(dim=-1)] @ self.clip_model.text_projection.type(self.diffusion.unet.dtype)
+    
     def _get_text_embeddings(self, text):
+        """
+        Args:
+            text (list[str]): text prompt
+        Return:
+            text_embeddings (torch.tensor): [2, 77, W] text feature
+        """
         text_ = clip.tokenize(text).to(self.device)
         text_embedding = self.encode_text_embedding(text_)
         
@@ -232,23 +249,12 @@ class Trainer:
         else:
             with torch.no_grad():
                 return self._get_text_embeddings(text)        
-        
-    def pooled_text_feature(self, ftr, tkn):
-        """
-        Args:
-            ftr (torch.tensor): [B, 77, W] text feature [batch_size, n_ctx, transformer.width:(ViT-B/32) / 768 (ViT-L/14)]
-            tkn (torch.tensor): [B, 77] text token
-        Return:
-            pooled feature; take features from the eot embedding (eot_token is the highest number in each sequence)
-        """
-        return ftr[torch.arange(ftr.shape[0]), tkn.argmax(dim=-1)] @ self.clip_model.text_projection
-    
 
     def get_image(self) -> torch.Tensor:
         image = Image.open(self.cfg.guide.image)
+        image_tensor = self.transform(image)[None].to(self.device) 
         image_embeds = self.clip_image_embeddings(image)
-        # return self.transform(image)
-        return image, self.transform(image)[None].to(self.device), image_embeds
+        return image, image_tensor, image_embeds
     
     def get_transform(self):
         return  transforms.Compose([
@@ -262,7 +268,7 @@ class Trainer:
         ## sphere
         # radius = 1.60
         ## SMPL
-        radius = 1.0
+        radius = 1.2
         thetas = 60.0
         phis   = -20.0 # minus left plus right
         dirs, thetas, phis, radius = circle_poses(self.device, radius=radius, theta=thetas, phi=phis)
@@ -297,95 +303,179 @@ class Trainer:
         logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True, format=log_format)
         logger.add(self.exp_path / 'log.txt', colorize=False, format=log_format)
 
-
-    def optimize_text_token(self, prompt, image_features, max_itr=100):
+    def optimize_text_token(self, 
+                            prompt, 
+                            image_features, 
+                            neg_prompt  = None,
+                            latents     = None,
+                            mix         = 0.1,
+                            max_itr     = 100, 
+                            save_itr    = 250,
+                            lambda_clip = 10.0,
+                            num_inference_steps=25,
+                            guidance_scale=7.5, 
+                            vis_loss=False,
+                            path = 'clip_test',
+                            lr = 1e-4,
+                            ):
         """
         Args:
-            prompt (str): initial text prompt
-            image_features ()
+            prompt (List[str]):             initial text prompt
+            image_features (torch.tensor):  [B, W] clip image embedding [batch_size, clipViT.width]
+            neg_prompt (List[str]):         negative text prompt (optional), default: None
+            latents (torch.tensor):         [B, 4, 64, 64] latent for diffusion
+            mix (float):                    ratio for blending latent with noise
+            max_itr (int):                  number of maximum iteration for optimization
+            save_itr (int):                 number of interval iteration for visualization
+            lambda_clip (float):            lambda weight for the loss
+            num_inference_steps (int):      number of denoising step
+            guidance_scale (float):         scalar for classifier free guidance
+            vis_loss (bool):                if True, calcultate clip loss using generated images
+            path (str):                     path for save visualization (optional), default: 'clip_test'
+            lr (float):                     learning rate for optimization
+            
         Return:
-            text_optimized
+            text_optimized (torch.tensor): [B, 77, W] text feature that is closer to image feature
         """
-        view_text_z = []
-        for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
-            text = f"{d} view"
-            view_text_z.append(self.diffusion.get_text_embeds([text]))
         
+        theta       = self.ref_pose['theta']
+        phi         = self.ref_pose['phi']
+        radius      = 1.3 # self.ref_pose['radius']
+        
+        ## lighting applied
         with torch.no_grad():
-            # txt -> token -> txt embed (hidden)
-            text_input = self.tokenizer(
-                prompt, 
-                padding='max_length', 
-                max_length=self.tokenizer.model_max_length, 
-                truncation=True, 
-                return_tensors='pt'
-            ).to(self.device)
-            # text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length, truncation=True, return_tensors='pt').to(self.device)
-            text_embeddings = self.clipmodel.text_model(text_input.input_ids.to(self.device))[0]
+            ### latent from lighting image
+            # outputs     = self.mesh_model.render_train_with_light(theta=theta, phi=phi, radius=radius, dims=(512, 512))
+            # latents     = self.diffusion.encode_imgs(outputs['image']*0.5)
+            # masks       = F.interpolate(outputs['mask'], (64, 64), mode='bilinear')
             
-            uncond_input = self.tokenizer(
-                [''] * len(prompt), 
-                padding='max_length', 
-                max_length=self.tokenizer.model_max_length, 
-                return_tensors='pt')
-
-            uncond_embeddings = self.clipmodel.text_model(uncond_input.input_ids.to(self.device))[0]
+            ### latent from rendered image
+            outputs     = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
+            masks       = outputs['mask']
+            latents     = outputs['image']
             
-            ## normalized image feature
-            image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-        text_embeddings.requires_grad = True
+            ### latent from reference image
+            # latents = self.diffusion.encode_imgs(self.ref_image_tensor)
+            
+            ### latent from random noise
+            # latents = torch.randn((1,4,64,64), device=self.device)
+            
+            ### mix!
+            latents     = latents * (masks) ## bg mask
+            # latents     = latents * (1-masks) ## fg silhouette
+            latents     = latents * mix + torch.randn((1,4,64,64), device=self.device) * (1-mix)
         
-        # image  = Image.open("/source/kseo/diffusion_playground/latent-nerf-test/data/monster_ball.jpg")
-        # prompt = "pokemon, monster ball, red and white color, on a grass"
-        # inputs = self.image_processor(text=[prompt], images=image, return_tensors="pt", padding=True)
-        # outputs = self.clipmodel(**inputs.to(self.device))
+
+        import os
+        def make_path(num):
+            path = 'clip_test{:03}'.format(num)
+            os.makedirs(path, exist_ok=True)
+            return path
+        
+        # path = make_path(0)  ### max_itr=500, lambda_clip=10.0, vis_loss=False, path=path)
+        # path = make_path(1)  ### max_itr=500, save_itr=100, lambda_clip=20.0, vis_loss=False, path=path)
+        # path = make_path(2)  ### max_itr=500, save_itr=100, lambda_clip=50.0, vis_loss=False, path=path)
+        # path = make_path(3)  ### max_itr=5000, save_itr=1000, lambda_clip=20.0, vis_loss=False, path=path)
+        # path = make_path(4)  ### max_itr=5000, save_itr=500, lambda_clip=20.0, vis_loss=True, path=path)
+        # path = make_path(5)  ### max_itr=5000, save_itr=1000, lambda_clip=20.0, vis_loss=False, path=path)
+        # path = make_path(6)  ## used criterionCLIP         ### max_itr=5000, save_itr=1000, lambda_clip=20.0, vis_loss=False, path=path)
+        # path = make_path(7)  ## used criterionCLIP lr=1e-5, betas=(0.9, 0.999)         ### max_itr=5000, save_itr=1000, lambda_clip=20.0, vis_loss=False, path=path)
+        # path = make_path(8)  ## used criterionCLIP         ### max_itr=5000, save_itr=50, lambda_clip=20.0, vis_loss=True, path=path)
+        # path = make_path(9)  ## used criterionCLIP using vis_loss
+        # path = make_path(10) ## used criterionCLIP using vis_loss + rendered init latent 
+        # path = make_path(11) ## used criterionCLIP using vis_loss + randn latent (optimize embedding + latent)
+        # path = make_path(12) ## criterionCLIP randn latent (optimize embedding + latent) mix! guidance 10
+        # path = make_path(12) ## criterionCLIP randn latent (optimize embedding + latent) mix! guidance 20
+        # path = make_path(12) ## criterionCLIP randn latent (optimize embedding + latent) mix! guidance 200 Explode!!!
+        # path = make_path(13) ## criterionCLIP using vis_loss randn latent (optimize embedding + latent) mix! guidance 10 lr=2e-4
+        # path = make_path(14) ## criterionCLIP using vis_loss randn latent (optimize embedding + latent) mix! guidance 10 lr=3e-3
+        path = make_path(15) ## criterionCLIP using vis_loss render latent (optimize embedding + latent) mix! guidance 10 lr=2e-3
+        
+        # transforms.ToPILImage()(outputs['image'][0]).save('{}/test.png'.format(path))
+        
+        if type(prompt) == list:
+            with torch.no_grad(): 
+                # txt -> token -> txt embed (hidden)
+                text_token       = clip.tokenize(prompt, truncate=True).to(self.device)
+                text_embeddings  = self.encode_text_embedding(text_token) ## padding makes difference!
+                
+                uncond_prompt    = [''] * len(prompt) if neg_prompt == None else neg_prompt
+                uncond_token     = clip.tokenize(uncond_prompt, truncate=True).to(self.device)
+                uncond_embeddings= self.encode_text_embedding(uncond_token) ## padding makes difference!
+        else:
+            text_embeddings = prompt
+            
+        text_embeddings.requires_grad = True
+        text_optimized = None
+            
+        optimizer = torch.optim.Adam([text_embeddings], lr=lr, betas=(0.9, 0.999), eps=1e-15)
+
+        prev_loss = 100
         
         itr = 0
-        save_itr = max_itr // 5
-        # max_itr = 100
         pbar = tqdm(total=max_itr, initial=itr)
-        optimizer = torch.optim.Adam([text_embeddings], lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
-        # scheduler = torch.optim.lr_scheduler.LambdaLR(
-        #     optimizer=optimizer,
-        #     lr_lambda=lambda epoch: 0.95 ** epoch,
-        #     last_epoch=-1,
-        #     verbose=False)
-
-        text_optimized = None
-        prev_loss = 100
-        while itr < max_itr:
-            itr += 1
+        while itr <= max_itr:            
             pbar.update(1)
+            description = ""
             
-            optimizer.zero_grad()            
-            # txt embed (hidden) -> txt feature
-            pooled_output = text_embeddings[
-                torch.arange(text_embeddings.shape[0], device=self.device),
-                text_input.input_ids.to(dtype=torch.int, device=self.device).argmax(dim=-1),
-            ]
-            text_features = self.clipmodel.text_projection(pooled_output)[0]
-                
-            # normalized text features
-            text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
-
-            ## cosine similarity
-            loss = 1.0 - self.criterionCLIP(text_features, image_features.detach())
+            optimizer.zero_grad()
             
-            loss.backward()
-            optimizer.step()
-            
-            # pbar.set_description("prev: {:06f} loss: {:06f} ".format(prev_loss, loss.item()))
-            pbar.set_description("loss: {:06f} ".format(loss.item()))
-            
+            # loss = 0
+            if vis_loss:
+                ### no gradient flow... why?
+                img = self.diffusion.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_embeddings]), num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, latents=latents, out_tensor=True)
+                img_emb = self.clip_image_embeddings(img, use_grad=True)
+                # loss = self.criterionCLIP(img_emb, image_features.detach()) * lambda_clip
+                loss = self.criterionL2(img_emb, image_features.detach()) * lambda_clip
+                # loss = - img_emb @ image_features.t().detach() * lambda_clip + loss
+            else:                
+                ### txt embed (hidden) -> txt feature
+                pooled_output = self.pooled_text_feature(text_embeddings, text_token)
+                text_features = pooled_output / pooled_output.norm(dim=-1, keepdim=True)
+                # loss = self.criterionCLIP(text_features, image_features.detach()) * lambda_clip
+                loss = self.criterionL2(text_features, image_features.detach()) * lambda_clip
+                # loss = - text_features @ image_features.t().detach() * lambda_clip
+                    
             if loss < prev_loss:
                 prev_loss      = loss.item()
                 text_optimized = text_embeddings.detach().clone()
                 
+            if itr == 0:
+                init_loss      = loss.item()
+                
             if itr % save_itr == 0 or itr == max_itr:
-                img = self.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_embeddings]))                
-                Image.fromarray(img[0]).save('test_{:03}.png'.format(itr))
-                img = self.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_optimized]))
-                Image.fromarray(img[0]).save('best.png')
+                description += "\n"
+                if vis_loss:
+                    save = torch.cat([self.ref_image_tensor[0], img[0]], dim=1) * 0.5 + 0.5
+                    transforms.ToPILImage()(save).save('{}/test_{:03}.png'.format(path, itr))
+                    
+                    ## save best
+                    with torch.no_grad():
+                        img_opt = self.diffusion.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_optimized]), num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, latents=latents)
+                    ref = self.ref_image_tensor.detach().cpu().permute(0, 2, 3, 1).numpy() * 0.5 + 0.5
+                    ref = (ref * 255).round().astype('uint8')
+                    save = np.concatenate([ref[0], img_opt[0]], axis=1)
+                    Image.fromarray(save).save('{}/best.png'.format(path))
+                else:
+                    with torch.no_grad():
+                        img = self.diffusion.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_embeddings]), num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, latents=latents)
+                        ref = self.ref_image_tensor.detach().cpu().permute(0, 2, 3, 1).numpy() * 0.5 + 0.5
+                        ref = (ref * 255).round().astype('uint8')
+                        save = np.concatenate([ref[0], img[0]], axis=1)
+                        Image.fromarray(save).save('{}/test_{:03}.png'.format(path, itr))
+
+                        ## save best
+                        img_opt = self.diffusion.embeds_to_img(torch.cat([uncond_embeddings.detach(), text_optimized]), num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, latents=latents)
+                        save = np.concatenate([ref[0], img_opt[0]], axis=1)
+                        Image.fromarray(save).save('{}/best.png'.format(path))
+            
+            loss.backward()
+            optimizer.step()
+            
+            description += "itr: {:04d}, init: {:05f}, loss: {:05f}".format(itr, init_loss, loss.item())
+            pbar.set_description(description)
+                
+            itr += 1
         return text_optimized
     
     def train(self):
@@ -396,10 +486,9 @@ class Trainer:
 
         ### TODO:
         ## 1. optimize text_x that best represents the image using CLIP CosSim loss
-        image_text_z = self.optimize_text_token([self.cfg.guide.text], self.image_z, self.ref_image_embeds, max_itr=100)
-        # if self.cfg.optim.use_opt_txt:
-        #     self.text_z = self.diffusion.optimize_text_token(self.text_z, self.image_z, max_itr=100)
+        # image_text_z = self.optimize_text_token([self.cfg.guide.text], self.ref_image_embeds, max_itr=5000, lr=2e-3, guidance_scale=10, vis_loss=False, mix=0.25)
         # import pdb;pdb.set_trace()
+        
         ## 2. use Paint-by-Example
 
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
@@ -432,7 +521,7 @@ class Trainer:
                 
                 # CLIPD = self.train_step % 10 == 1
                 # CLIPD = np.random.uniform(0, 1) < 0.5
-                CLIPD = True
+                CLIPD = False
                 
                 use_clip = True
                 log = np.random.uniform(0, 1) < 0.05
@@ -452,7 +541,7 @@ class Trainer:
                         descrition += "type 2: "
                         pred_rgbs, lap_loss, loss_guidance = self.train_render_clip(data, use_clip=use_clip, log=log)
                     else:
-                        ### Score Distillation Sampling only
+                        ### SDS only
                         descrition += "type 3: "
                         pred_rgbs, lap_loss, loss_guidance = self.train_render_text(data)
                 self.optimizer.step()
