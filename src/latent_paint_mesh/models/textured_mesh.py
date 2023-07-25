@@ -19,7 +19,8 @@ class TexturedMeshModel(nn.Module):
                  render_grid_size=64,
                  latent_mode=True,
                  texture_resolution=128,
-                 device=torch.device('cpu')):
+                 device=torch.device('cpu')
+                ):
 
         super().__init__()
         self.device = device
@@ -42,6 +43,18 @@ class TexturedMeshModel(nn.Module):
         self.renderer = Renderer(device=self.device, dim=(render_grid_size, render_grid_size),
                                  interpolation_mode=self.opt.guide.texture_interpolation_mode)
         self.env_sphere, self.mesh = self.init_meshes()
+        
+        # self.init_lap = self.mesh_laplacian_smoothing(self.mesh)
+        # import pdb;pdb.set_trace()
+        ## laplacian smoothing
+        ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
+        with torch.no_grad():
+            weights = 1.0 / torch.tensor(self.mesh.vertices.shape[0]).float()
+            L = kal.ops.mesh.uniform_laplacian(self.mesh.vertices.shape[0], self.mesh.faces)
+            lap_loss = L.mm(self.mesh.vertices)
+            self.init_lap_loss = lap_loss.norm(dim=1) * weights
+        # lap_loss = lap_loss.sum()
+        
         self.background_sphere_colors, self.texture_img, self.texture_img_rgb_finetune = self.init_paint()
         
         # vertices displacement
@@ -187,7 +200,7 @@ class TexturedMeshModel(nn.Module):
             fp.write(f'illum 1 \n')
             fp.write(f'Ns 0.000000 \n')
             fp.write(f'map_Kd {name}albedo.png \n')
-
+    
     def render(self, theta, phi, radius, decode_func=None, test=False, dims=None, use_decode=False):
         if test:
             return self.render_test(theta, phi, radius, decode_func, dims=dims)
@@ -242,10 +255,12 @@ class TexturedMeshModel(nn.Module):
         with torch.no_grad():
             # kal.metrics.mesh.laplacian_loss()
             L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
-        # lap_loss = L.mm(self.displacement + self.mesh.vertices)
-        lap_loss = L.mm(self.displacement)
+        lap_loss = L.mm(self.displacement + self.mesh.vertices)
+        # lap_loss = L.mm(self.displacement)
         lap_loss = lap_loss.norm(dim=1) * weights
-        lap_loss = lap_loss.sum()
+        # lap_loss = lap_loss.sum()
+        # import pdb;pdb.set_trace()
+        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap_loss)**2))
         # import pdb;pdb.set_trace()
         
         # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features, 'lap_loss': lap_loss}
