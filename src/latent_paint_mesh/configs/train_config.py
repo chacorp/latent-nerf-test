@@ -9,19 +9,22 @@ class RenderConfig:
     """ Parameters for the Mesh Renderer """
     # Render height,width for training
     # train_grid_size: int = 64
-    train_grid_size: int = 128
+    train_grid_size: int = 256
     # Render height,width for evaluation
     eval_grid_size: int = 512
     # training camera radius range
     # radius_range: Tuple[float, float] = (1.45, 1.75)
-    radius_range: Tuple[float, float] = (0.8, 1.0)
+    # radius_range: Tuple[float, float] = (0.8, 1.2)
+    radius_range: Tuple[float, float] = (1.0, 1.5)
     # Set [0,angle_overhead] as the overhead region
     angle_overhead: float = 40
     # Define the front angle region
     angle_front: float = 70
     # Which NeRF backbone to use
     backbone: str = 'texture-mesh'
-
+    # not used
+    bg_white: bool = False
+    
 @dataclass
 class GuideConfig:
     """ Parameters defining the guidance """
@@ -83,14 +86,19 @@ class OptimConfig:
     # lr: float = 1e-3
     # lr: float = 2e-3
     # lr: float = 2e-2
-    lr: float = 15e-3
+    lr: float = 1e-2
+    # lr: float = 15e-3
     ## Displacement
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
     # disp_lr: float = 5e-3
+    # disp_lr: float = 1e-4
+    disp_lr: float = 1e-4 ## MLP
     # disp_lr: float = 2e-5
-    disp_lr: float = 3e-5
-    lap_weight: float = 100.
-    reg_weight: float = 2.
+    # disp_lr: float = 5e-5
+    # lap_weight: float = 100.
+    # reg_weight: float = 10.
+    lap_weight: float = 1.
+    reg_weight: float = 1.
 
 
 @dataclass
