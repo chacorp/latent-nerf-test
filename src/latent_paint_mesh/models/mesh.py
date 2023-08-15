@@ -24,21 +24,21 @@ class Mesh:
         self.vt = mesh.uvs
 
     def standardize_mesh(self,inplace=False):
-        mesh = self if inplace else copy.deepcopy(self)
+        mesh   = self if inplace else copy.deepcopy(self)
 
-        verts = mesh.vertices
+        verts  = mesh.vertices
         center = verts.mean(dim=0)
         verts -= center
-        scale = torch.std(torch.norm(verts, p=2, dim=1))
+        scale  = torch.std(torch.norm(verts, p=2, dim=1))
         verts /= scale
         mesh.vertices = verts
         return mesh
 
     def normalize_mesh(self,inplace=False, target_scale=1, dy=0):
-        mesh = self if inplace else copy.deepcopy(self)
+        mesh  = self if inplace else copy.deepcopy(self)
 
         verts = mesh.vertices
-        center = verts.mean(dim=0)
+        center= verts.mean(dim=0)
         verts = verts - center
         scale = torch.max(torch.norm(verts, p=2, dim=1))
         verts = verts / scale
