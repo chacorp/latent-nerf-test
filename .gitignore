@@ -10,5 +10,6 @@ logs/*
 .idea
 
 experiments/
+clip_test/
 src/token.txt
 .ipynb_checkpoints
