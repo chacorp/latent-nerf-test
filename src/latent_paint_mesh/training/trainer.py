@@ -280,7 +280,9 @@ class Trainer:
         return optimizer
     
     def init_optimizer_disp(self) -> Optimizer:
-        return torch.optim.Adam([self.mesh_model.displacement], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
+        # return torch.optim.Adam([self.mesh_model.displacement], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
+        # return torch.optim.Adam([self.mesh_model.xi], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
+        return torch.optim.Adam([*self.mesh_model.MLP.parameters()], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
 
     def init_dataloaders(self) -> Dict[str, DataLoader]:
         train_dataloader = ViewsDataset(self.cfg.render, device=self.device, type='train', size=100).dataloader()
@@ -524,7 +526,7 @@ class Trainer:
                 # if self.train_step < 100:
                 if False:
                     ### Image Reconstruction loss
-                    descrition += "step 1: "
+                    descrition += "type 1: "
                     reconstruction = True
                     # use_clip = False
                     pred_rgbs, lap_loss, loss_guidance     = self.train_render_clip(data, use_clip=use_clip, log=log)
@@ -544,20 +546,26 @@ class Trainer:
                 # lap_loss = (lap_loss * laplacian_weight)
                 # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L30
                 # lap_loss =  10. ** 4 * lap_loss #/ (1 + self.train_step)
-                lap_loss = self.cfg.optim.lap_weight ** 2 * lap_loss / (1 + self.train_step)
+                lap_loss = (self.cfg.optim.lap_weight ** 2) * lap_loss / (1 + self.train_step)
                 # 'lap': lambda cst, it: 2000**2*cst / (1 + it)
 
                 ## Offset regularization
                 ## ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L31
-                reg_loss = torch.mean(torch.mean(self.mesh_model.displacement[None]**2, axis=1), axis=1)
-                reg_loss = 10. ** self.cfg.optim.reg_weight * reg_loss # / (1 + (step_weight))
+                
+                # displacement = self.mesh_model.Linv.mm(self.mesh_model.xi)
+                displacement = self.mesh_model.MLP(self.mesh_model.init_lap)
+                # displacement = self.mesh_model.displacement
+                reg_loss = torch.mean(torch.mean(displacement[None]**2, axis=1), axis=1)
+                reg_loss = (10. ** self.cfg.optim.reg_weight) * reg_loss # / (1 + (step_weight))
+                
+                # 'offsets' = torch.mean(torch.mean(smpl.offsets ** 2, axis=1))
                 
                 loss = lap_loss + reg_loss + loss_guidance
                 loss.backward()
                 ## optimize displacement interval
                 self.optimizer_disp.step()
                 
-                new_disp = torch.mean(self.mesh_model.displacement)
+                new_disp = torch.mean(displacement)
                 descrition += "disp:{:05f} ".format(new_disp)                
                 descrition += "lap: {:05f} reg:{:05f} ".format(lap_loss.item(), reg_loss.item())
                 if use_clip and CLIPD:
@@ -579,6 +587,7 @@ class Trainer:
                 if log:
                     # not pixelwise loss :: 'pred_rgbs' should be latent (4 channel)
                     # Randomly log rendered images throughout the training
+                    logger.info('view: theta={}, phi={}, radius={}'.format(data['theta'], data['phi'], data['radius']))
                     self.log_train_renders(pred_rgbs)
                     
         logger.info('Finished Training ^_^')
@@ -681,8 +690,10 @@ class Trainer:
         phi      = data['phi']
         radius   = data['radius']
 
-        # import pdb;pdb.set_trace()
         outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
+        
+        # pred_rgb = self.diffusion.decode_latents(outputs['image'])
+        # transforms.ToPILImage()(pred_rgb[0]).save('test.png')
         
         ## rendered w/ current texture
         pred_rgb        = outputs['image']      # [B, 3, H, W]
