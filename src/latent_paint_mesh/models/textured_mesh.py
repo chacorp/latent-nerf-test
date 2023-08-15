@@ -12,6 +12,7 @@ from .mesh import Mesh
 from .render import Renderer
 from src.latent_paint.configs.train_config import TrainConfig
 
+from .model import MLP
 
 class TexturedMeshModel(nn.Module):
     def __init__(self,
@@ -44,15 +45,24 @@ class TexturedMeshModel(nn.Module):
                                  interpolation_mode=self.opt.guide.texture_interpolation_mode)
         self.env_sphere, self.mesh = self.init_meshes()
         
+        self.MLP = MLP(input_dim=3).cuda()
+        
         # self.init_lap = self.mesh_laplacian_smoothing(self.mesh)
         # import pdb;pdb.set_trace()
         ## laplacian smoothing
         ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
         with torch.no_grad():
-            weights = 1.0 / torch.tensor(self.mesh.vertices.shape[0]).float()
-            L = kal.ops.mesh.uniform_laplacian(self.mesh.vertices.shape[0], self.mesh.faces)
-            lap_loss = L.mm(self.mesh.vertices)
-            self.init_lap_loss = lap_loss.norm(dim=1) * weights
+            self.Lweights = 1.0 / torch.tensor(self.mesh.vertices.shape[0]).float()
+            self.L = kal.ops.mesh.uniform_laplacian(self.mesh.vertices.shape[0], self.mesh.faces)
+            self.Linv = torch.linalg.inv(self.L)
+            
+            lap_loss = self.L.mm(self.mesh.vertices) ## laplacian coordinates
+            # self.xi = nn.Parameter(torch.zeros_like(lap_loss).cuda())
+            # self.xi = nn.Parameter(lap_loss.clone().cuda())
+            
+            # import pdb;pdb.set_trace()
+            # self.init_lap = lap_loss.norm(dim=1) * self.Lweights
+            self.init_lap = lap_loss
         # lap_loss = lap_loss.sum()
         
         self.background_sphere_colors, self.texture_img, self.texture_img_rgb_finetune = self.init_paint()
@@ -65,7 +75,7 @@ class TexturedMeshModel(nn.Module):
         self.face_attributes = kal.ops.mesh.index_vertices_by_faces(
             self.vt.unsqueeze(0),
             self.ft.long()).detach()
-
+        
     def init_meshes(self, env_sphere_path='shapes/env_sphere.obj'):
         env_sphere = Mesh(env_sphere_path, self.device)
 
@@ -90,8 +100,7 @@ class TexturedMeshModel(nn.Module):
                                                                                 self.texture_resolution).cuda())
 
         # used only for latent-paint fine-tuning, values set when reading previous checkpoint statedict
-        texture_img_rgb_finetune = nn.Parameter(torch.zeros(1, 3,
-                                                            self.texture_resolution, self.texture_resolution).cuda())
+        texture_img_rgb_finetune = nn.Parameter(torch.zeros(1, 3, self.texture_resolution, self.texture_resolution).cuda())
 
         return background_sphere_colors, texture_img, texture_img_rgb_finetune
     
@@ -131,16 +140,20 @@ class TexturedMeshModel(nn.Module):
     def get_params(self):
         if self.latent_mode:
             return [self.background_sphere_colors, self.texture_img]
-            # return [self.background_sphere_colors, self.texture_img, self.displacement]
-            # return [self.background_sphere_colors, self.displacement]
         else:
             return [self.background_sphere_colors, self.texture_img_rgb_finetune]
-            # return [self.background_sphere_colors, self.texture_img_rgb_finetune, self.displacement]
 
     @torch.no_grad()
     def export_mesh(self, path, guidance=None):
         # v, f = self.mesh.vertices, self.mesh.faces.int()
-        v, f = self.mesh.vertices+self.displacement, self.mesh.faces.int()
+        # displacement = self.Linv.mm(self.xi)
+        # if displacement.max() > 0:
+        #     displacement = self.normalize_torch(displacement)
+        displacement = self.MLP(self.init_lap)
+        # displacement = self.displacement
+        
+        # v, f = self.mesh.vertices+self.displacement, self.mesh.faces.int()
+        v, f = self.mesh.vertices+displacement, self.mesh.faces.int()
         h0, w0 = 256, 256
         ssaa, name = 1, ''
                 
@@ -210,6 +223,11 @@ class TexturedMeshModel(nn.Module):
             else:
                 return self.render_train(theta, phi, radius)
 
+    def normalize_torch(self, V):
+        ### torch
+        V = (V-(V.max(0).values + V.min(0).values) * 0.5)/max(V.max(0).values - V.min(0).values)
+        return V
+
     def render_train(self, theta, phi, radius):
         if self.latent_mode:
             texture_img = self.texture_img
@@ -218,9 +236,15 @@ class TexturedMeshModel(nn.Module):
             texture_img = self.texture_img_rgb_finetune
             # torch.autograd.set_detect_anomaly(True)
             # background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
-        # import pdb; pdb.set_trace()
         
         # add displacement
+        # displacement = self.Linv.mm(self.xi)
+        # if displacement.max() > 0:
+        #     displacement = self.normalize_torch(displacement)
+        displacement = self.MLP(self.init_lap)
+        # displacement = displacement[None].norm(dim=0)
+        # import pdb; pdb.set_trace()
+        # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
@@ -229,7 +253,8 @@ class TexturedMeshModel(nn.Module):
                                                                        azim           = phi,
                                                                        radius         = radius,
                                                                        look_at_height = self.dy,
-                                                                       disp           = self.displacement)
+                                                                       disp           = displacement
+                                                                      )
         # pred_back, _ = self.renderer.render_single_view(self.env_sphere,
         #                                                 background_sphere_colors,
         #                                                 elev           = theta,
@@ -249,18 +274,15 @@ class TexturedMeshModel(nn.Module):
             # pred_map      = F.interpolate(pred_map, (64, 64), mode='bicubic')
             
         ## laplacian smoothing
-        ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
-        weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
-        
-        with torch.no_grad():
+        ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html        
+        # with torch.no_grad():
             # kal.metrics.mesh.laplacian_loss()
-            L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
-        lap_loss = L.mm(self.displacement + self.mesh.vertices)
+            # L = kal.ops.mesh.uniform_laplacian(self.mesh.vertices.shape[0], self.mesh.faces)
         # lap_loss = L.mm(self.displacement)
-        lap_loss = lap_loss.norm(dim=1) * weights
+        lap_loss = self.L.mm(displacement + self.mesh.vertices)
+        # lap_loss = lap_loss.norm(dim=1) * self.Lweights
         # lap_loss = lap_loss.sum()
-        # import pdb;pdb.set_trace()
-        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap_loss)**2))
+        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
         # import pdb;pdb.set_trace()
         
         # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features, 'lap_loss': lap_loss}
@@ -275,6 +297,11 @@ class TexturedMeshModel(nn.Module):
             texture_img = self.texture_img_rgb_finetune
 
         # add displacement
+        # displacement = self.Linv.mm(self.xi)
+        # if displacement.max() > 0:
+        #     displacement = self.normalize_torch(displacement)
+        displacement = self.MLP(self.init_lap)
+        # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
@@ -285,7 +312,8 @@ class TexturedMeshModel(nn.Module):
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
                                                                        white_background=True,
-                                                                       disp=self.displacement)
+                                                                       disp=displacement
+                                                                      )
 
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask}
     
@@ -298,6 +326,10 @@ class TexturedMeshModel(nn.Module):
             texture_img = self.texture_img_rgb_finetune
             background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
         
+        # displacement = self.Linv.mm(self.xi)
+        # displacement = displacement[None].norm(dim=0)
+        displacement = self.MLP(self.init_lap)
+        # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
@@ -307,25 +339,31 @@ class TexturedMeshModel(nn.Module):
                                                                        radius=radius,
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
-                                                                       disp=self.displacement)
+                                                                       disp=displacement
+                                                                      )
         
         ## laplacian smoothing
         ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
-        weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
-        
-        with torch.no_grad():
+        # with torch.no_grad():
             # kal.metrics.mesh.laplacian_loss()
-            L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
+            # L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
         # lap_loss = L.mm(self.displacement + self.mesh.vertices)
-        lap_loss = L.mm(self.displacement)
-        lap_loss = lap_loss.norm(dim=1) * weights
-        lap_loss = lap_loss.sum()
+        # lap_loss = L.mm(self.displacement)
+        lap_loss = self.L.mm(self.mesh.vertices+displacement)
+        # lap_loss = lap_loss.norm(dim=1) * self.Lweights
+        # lap_loss = lap_loss.sum()
+        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
         
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
         # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
     
     def render_train_with_light(self, theta, phi, radius, dims=None):
         texture_img = self.texture_img
+        # displacement = self.Linv.mm(self.xi)
+        # if displacement.max() > 0:
+        #     displacement = self.normalize_torch(displacement)
+        displacement = self.MLP(self.init_lap)
+        # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture_lighting(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.face_attributes,
@@ -335,19 +373,19 @@ class TexturedMeshModel(nn.Module):
                                                                        radius=radius,
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
-                                                                       disp=self.displacement)
+                                                                       disp=displacement,
+                                                                        )
         
         ## laplacian smoothing
         ## ref: https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/loss/mesh_laplacian_smoothing.html
-        weights = 1.0 / torch.tensor(self.displacement.shape[0]).float()
-        
-        with torch.no_grad():
+        # with torch.no_grad():
             # kal.metrics.mesh.laplacian_loss()
-            L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
+            # L = kal.ops.mesh.uniform_laplacian(self.displacement.shape[0], self.mesh.faces)
         # lap_loss = L.mm(self.displacement + self.mesh.vertices)
-        lap_loss = L.mm(self.displacement)
-        lap_loss = lap_loss.norm(dim=1) * weights
-        lap_loss = lap_loss.sum()
+        lap_loss = self.L.mm(self.mesh.vertices+displacement)
+        # lap_loss = lap_loss.norm(dim=1) * self.Lweights
+        # lap_loss = lap_loss.sum()
+        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
         
         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
         # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
