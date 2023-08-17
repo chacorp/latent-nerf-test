@@ -71,6 +71,7 @@ class Trainer:
         self.criterionL1        = nn.L1Loss()
         self.criterionL2        = nn.MSELoss()
         self.criterionCLIP      = torch.nn.CosineSimilarity(dim=1, eps=1e-12)
+        self.downSample         = nn.Upsample(scale_factor=0.125, mode='nearest')
         
         self.normalize_clip     = transforms.Normalize(
                 (0.48145466, 0.4578275,  0.40821073), 
@@ -111,10 +112,12 @@ class Trainer:
         # text-guided 
         if self.cfg.optim.use_SD:
             MODEL_NAME = '/source/kseo/huggingface_cache/models--runwayml--stable-diffusion-v1-5/snapshots/aa9ba505e1973ae5cd05f5aedd345178f52f8e6a'
+            # MODEL_NAME = 'CompVis/stable-diffusion-v1-4'
             CACHE_DIR = "/source/kseo/huggingface_cache"
             diffusion_model = StableDiffusion(
                     self.device, 
                     model_name   = MODEL_NAME,
+                    cache_dir   = CACHE_DIR,
                     latent_mode  = self.mesh_model.latent_mode,
                 )
         else:
@@ -246,7 +249,7 @@ class Trainer:
                 return self._get_text_embeddings(text)        
 
     def get_image(self) -> torch.Tensor:
-        image = Image.open(self.cfg.guide.image)
+        image = Image.open(self.cfg.guide.image).convert('RGB')
         image_tensor = self.transform(image)[None].to(self.device) 
         image_embeds = self.clip_image_embeddings(image)
         return image, image_tensor, image_embeds
@@ -517,7 +520,8 @@ class Trainer:
                 
                 # CLIPD = self.train_step % 10 == 1
                 # CLIPD = np.random.uniform(0, 1) < 0.5
-                CLIPD = False
+                # CLIPD = False
+                CLIPD = True
                 
                 use_clip = True
                 log = np.random.uniform(0, 1) < 0.05
@@ -661,18 +665,24 @@ class Trainer:
         lap_loss        = outputs['lap_loss']
         
         
-        if self.cfg.guide.append_direction:
-            dirs = data['dir']  # [B,]
-            text_z = self.text_z[dirs]
-        else:
-            text_z = self.text_z
+        # if self.cfg.guide.append_direction:
+        #     dirs = data['dir']  # [B,]
+        #     text_z = self.text_z[dirs]
+        # else:
+        #     text_z = self.text_z
         
-        # import pdb;pdb.set_trace()
-        imgs          = self.diffusion.decode_latents_grad(pred_rgb)  
-        image_embeds    = self.clip_image_embeddings(imgs, use_grad=True)
+        import pdb;pdb.set_trace()
+        # imgs          = self.diffusion.decode_latents_grad(pred_rgb)  
+        # loss_guidance = self.diffusion.img_clip_loss(self.clip_model, self.ref_image_tensor, imgs) ## cos-sim
+        img = torch.einsum('bi,abcd->aicd', self.diffusion.linear_rgb_estimator, pred_rgb) * 0.5 + 0.5
+        ref = self.downSample(self.ref_image_tensor)
+        loss_guidance = self.diffusion.img_clip_loss(self.clip_model, ref, img) ## cos-sim
+        
+        
+        # image_embeds    = self.clip_image_embeddings(imgs, use_grad=True)
         # out_embeds    = out_embeds / out_embeds.norm(dim=-1, keepdim=True)
         # ref_embeds    = self.ref_image_embeds / self.ref_image_embeds.norm(dim=-1, keepdim=True)
-        loss_guidance = -(image_embeds * self.ref_image_embeds).sum(-1).mean()
+        # loss_guidance = -(image_embeds * self.ref_image_embeds).sum(-1).mean()
         loss_guidance.backward(retain_graph=True)
         
         # loss_guidance = self.diffusion.train_step(
@@ -686,9 +696,12 @@ class Trainer:
         return pred_rgb, lap_loss, loss_guidance
 
     def train_render_text(self, data: Dict[str, Any]):
-        theta    = data['theta']
-        phi      = data['phi']
-        radius   = data['radius']
+        # theta    = data['theta']
+        # phi      = data['phi']
+        # radius   = data['radius']
+        theta       = self.ref_pose['theta']
+        phi         = self.ref_pose['phi']
+        radius      = self.ref_pose['radius']
 
         outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
         
@@ -707,6 +720,99 @@ class Trainer:
             text_z = self.text_z[dirs]
         else:
             text_z = self.text_z
+        
+        ### noise guidence
+        ref_encode = self.diffusion.encode_imgs(self.ref_image_tensor*0.5+0.5)
+        
+        noise = torch.randn_like(ref_encode)
+        # latent_gray = torch.tensor([0.9071, -0.7711,  0.7437,  0.1510])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+        latent_gray = torch.tensor([-0.0012,  0.0034,  0.0028,  0.0033])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+        latent_white = torch.tensor([2.0595,  1.2667,  0.0866, -1.0816])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+        
+        latent_mask = torch.ones_like(pred_rgb) * latent_gray
+        pred_rgb = pred_rgb * pred_rgb_mask
+        # pred_rgb = latent_mask * (1 - pred_rgb_mask) + pred_rgb * pred_rgb_mask
+        noise_mask = noise * pred_rgb_mask
+        
+        pred_rgb_mask_4 = pred_rgb_mask.repeat(1,4,1,1)
+        ## forward with text-embedding
+        # latents = self.diffusion.produce_latents(text_z, latents=noise)
+        # latents = self.diffusion.produce_latents(text_z, latents=ref_encode)
+        # latents = self.diffusion.produce_latents(text_z, latents=pred_rgb)
+        
+        # inverting latent to noise
+        latents_xt, latents_list = self.diffusion.invert(ref_encode, text_z, guidance_scale=1.0, return_intermediates=True)
+        # latents_xt, latents_list = self.diffusion.invert(ref_encode, text_z, return_intermediates=True)
+        latents_list = list(reversed(latents_list))
+        
+        ## 0: noise ~~~ 50(num_inference_steps): image
+                
+        # self.diffusion.scheduler_inv.timesteps[num]
+        # self.diffusion.scheduler.timesteps[num]
+        
+        num = 10
+        ### reconstruction
+        # latents_ = self.diffusion.produce_latents(text_z, latents=latents_list[num], start=num) 
+        """
+            TODO:
+            - [v] DDIM inversion
+            - [v] null-text inversion : get optimal 'text_z' (uncond_embeddings_list) - carefull with the guidance_scale
+            - [?] better initialization for texture ...? 
+            - [ ] denoise with geometry contraint (follow 'pred_rgb')
+        """
+        uncond_embeddings_list = self.diffusion.null_optimization(latents_list, text_z, guidance_scale=7.5)
+        import pdb;pdb.set_trace()
+
+
+        # latents = self.diffusion.produce_latents(text_z, latents=latents_list[num], guidance_scale=7.5, start=num)
+        # latents = self.diffusion.produce_latents(text_z, latents=latents_list[num], guidance_scale=1.0, start=num)
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-xt.png')
+        
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-st-0.png')
+        transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb)[0]).save('test_dummy-pred_rgb.png')
+        transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb_mask_4)[0]).save('test_dummy-pred_rgb.png')
+        transforms.ToPILImage()(self.diffusion.decode_latents(noise_mask)[0]).save('test_dummy-pred_rgb.png')
+        # transforms.ToPILImage()(pred_rgb_mask[0]).save('test_dummy-st-0.png')
+        
+        # latents_st = self.diffusion.produce_latents(text_z, latents=pred_rgb, start=num)
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents_st)[0]).save('test_dummy-st-{}.png'.format(num))
+        
+        #### anti-guidance
+        # latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guide_latents_list=latents_list, clip_model=self.clip_model, start=num, beta=3.0)
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-ag-{}-b05-8.png'.format(num))
+        
+        # latents = self.diffusion.produce_latents_guide(text_z, latents=latents_list[num], guide_latents_list=latents_list, clip_model=self.clip_model, start=num, beta=0)
+        latents = self.diffusion.produce_latents_guide(text_z, latents=latents_list[num], guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+        
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-xt.png'.format(num))
+        
+        latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+        
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-pred_rgb.png'.format(num))
+        
+        latents = self.diffusion.produce_latents_guide(text_z, latents=noise_mask, guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+        
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-noise_mask.png'.format(num))
+        
+        latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guidance_scale=17.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+        
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-noise.png'.format(num))
+        # latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guide_latents=ref_encode, clip_model=self.clip_model, beta=10.)
+        # latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guide_latents_list=latents_list, clip_model=self.clip_model, beta=2)
+        # latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guide_latents=ref_encode, clip_model=self.clip_model)
+        
+        # torch.nn.MSELoss()(noise, noise_) / torch.norm(noise-ref_encode)
+        
+        # imgs = self.diffusion.decode_latents(latents)
+        # imgs = self.diffusion.decode_latents(ref_encode)
+        # imgs = self.diffusion.decode_latents(pred_rgb)
+        # transforms.ToPILImage()(latents_xt[0]).save('test_latents_xt.png')
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents_xt)[0]).save('test_latents_xt_ad.png')
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_guide-aG-b2.0.png')        
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_guide_list-ad-w2.0.png')
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_recon.png')
+        transforms.ToPILImage()(self.diffusion.decode_latents(latents_xt)[0]).save('test_latents_xt.png')
+        
         loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
 
         return pred_rgb, lap_loss, loss_guidance
