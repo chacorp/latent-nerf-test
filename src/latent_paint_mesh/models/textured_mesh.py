@@ -40,6 +40,9 @@ class TexturedMeshModel(nn.Module):
             [-0.158, 0.189, 0.264],  # L3
             [-0.184, -0.271, -0.473],  # L4
         ]).to(self.device)
+        self.latent_gray = torch.tensor(
+                [0.9071, -0.7711,  0.7437,  0.1510]
+            )[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
 
         self.renderer = Renderer(device=self.device, dim=(render_grid_size, render_grid_size),
                                  interpolation_mode=self.opt.guide.texture_interpolation_mode)
@@ -95,9 +98,14 @@ class TexturedMeshModel(nn.Module):
             list(init_rgb_color)).float().to(A.device)
 
         # init colors with target latent plus some noise
-        texture_img = nn.Parameter(
-            init_color_in_latent[None, :, None, None] * 0.3 + 0.4 * torch.randn(1, 4, self.texture_resolution,
-                                                                                self.texture_resolution).cuda())
+        # texture_img = nn.Parameter(
+        #     init_color_in_latent[None, :, None, None] * 0.3 + 0.4 * torch.randn(1, 4, self.texture_resolution,
+        #                                                                         self.texture_resolution).cuda())
+        scale = 4
+        tex_size = self.texture_resolution // scale
+        upSample = nn.Upsample(scale_factor=scale, mode='nearest')
+        init_tex = init_color_in_latent[None, :, None, None] * 0.3 + 0.4 * torch.randn(1, 4, tex_size, tex_size).cuda()
+        texture_img = nn.Parameter(upSample(init_tex))
 
         # used only for latent-paint fine-tuning, values set when reading previous checkpoint statedict
         texture_img_rgb_finetune = nn.Parameter(torch.zeros(1, 3, self.texture_resolution, self.texture_resolution).cuda())
@@ -241,7 +249,7 @@ class TexturedMeshModel(nn.Module):
         # displacement = self.Linv.mm(self.xi)
         # if displacement.max() > 0:
         #     displacement = self.normalize_torch(displacement)
-        displacement = self.MLP(self.init_lap)
+        displacement = 0 #self.MLP(self.init_lap)
         # displacement = displacement[None].norm(dim=0)
         # import pdb; pdb.set_trace()
         # displacement = self.displacement
@@ -300,7 +308,7 @@ class TexturedMeshModel(nn.Module):
         # displacement = self.Linv.mm(self.xi)
         # if displacement.max() > 0:
         #     displacement = self.normalize_torch(displacement)
-        displacement = self.MLP(self.init_lap)
+        displacement = 0# self.MLP(self.init_lap)
         # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
@@ -328,7 +336,7 @@ class TexturedMeshModel(nn.Module):
         
         # displacement = self.Linv.mm(self.xi)
         # displacement = displacement[None].norm(dim=0)
-        displacement = self.MLP(self.init_lap)
+        displacement =0# self.MLP(self.init_lap)
         # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
@@ -362,7 +370,7 @@ class TexturedMeshModel(nn.Module):
         # displacement = self.Linv.mm(self.xi)
         # if displacement.max() > 0:
         #     displacement = self.normalize_torch(displacement)
-        displacement = self.MLP(self.init_lap)
+        displacement = 0#self.MLP(self.init_lap)
         # displacement = self.displacement
         pred_features, mask = self.renderer.render_single_view_texture_lighting(self.mesh.vertices,
                                                                        self.mesh.faces,
