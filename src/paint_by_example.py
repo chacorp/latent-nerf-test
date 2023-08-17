@@ -88,9 +88,9 @@ class PaintbyExample(nn.Module):
         logger.info(f'\t successfully loaded stable diffusion!')
         self.linear_rgb_estimator = torch.tensor([
             #   R       G       B
-            [0.298, 0.207, 0.208],  # L1
-            [0.187, 0.286, 0.173],  # L2
-            [-0.158, 0.189, 0.264],  # L3
+            [ 0.298,  0.207,  0.208],  # L1
+            [ 0.187,  0.286,  0.173],  # L2
+            [-0.158,  0.189,  0.264],  # L3
             [-0.184, -0.271, -0.473],  # L4
         ]).to(self.device)
         
@@ -192,6 +192,27 @@ class PaintbyExample(nn.Module):
 
         return image_embeddings
 
+    def step(self,
+            model_output: torch.FloatTensor,
+            timestep: int,
+            x: torch.FloatTensor,
+            eta: float=0.0,
+            verbose=False,):
+        """
+        Args
+            model_output (torch.tensor): noise
+            timestep (int): t
+            x (torch.tensor): latents
+        """
+        prev_timestep = timestep - self.num_train_timesteps // self.num_inference_steps
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+        alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep > 0 else self.scheduler.final_alpha_cumprod
+        beta_prod_t = 1 - alpha_prod_t
+        pred_x0 = (x - beta_prod_t**0.5 * model_output) / alpha_prod_t**0.5
+        pred_dir = (1 - alpha_prod_t_prev)**0.5 * model_output
+        x_prev = alpha_prod_t_prev**0.5 * pred_x0 + pred_dir
+        return x_prev, pred_x0
+    
     def produce_latents(self,
             latents_masked_images, # [2, 4, 64, 64]
             latents_masks, # [2, 4, 64, 64]
@@ -405,6 +426,7 @@ class PaintbyExample(nn.Module):
                 
         # set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
+        # self.scheduler.set_timesteps(1, device=self.device)
        
         # guided inference
         latents_masks         = torch.cat([latents_masks]*2, dim=0)
@@ -415,18 +437,46 @@ class PaintbyExample(nn.Module):
             latents = torch.randn_like(latents, device=self.device)
        
         # Text embeds -> img latents
-        latents = self.produce_latents(
-            latents_masked_images=latents_masked_images,
-            latents_masks=latents_masks,
-            latents=latents,
-            image_embeddings=img_embeds,
-            guidance_scale=guidance_scale) 
-        # import pdb;pdb.set_trace()
+        # latents = self.produce_latents(
+        #     latents_masked_images=latents_masked_images,
+        #     latents_masks=latents_masks,
+        #     latents=latents,
+        #     image_embeddings=img_embeds,
+        #     guidance_scale=guidance_scale) 
+        def sample(latents_masked_images, latents_masks, latents, img_embeds, guidance_scale):
+            with torch.autocast('cuda'):
+                for i, t in enumerate(self.scheduler.timesteps):
+                    
+                    latent_model_input = torch.cat([latents] * 2) 
+                    # -> extend in batch [2, 4, 64, 64]
+                    
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t) 
+                    # -> [2, 4, 64, 64]
+                    
+                    latent_model_input = torch.cat([latent_model_input, latents_masked_images, latents_masks], dim=1)
+                    # -> [2, 9, 64, 64]
+                    
+                    # predict the noise residual
+                    with torch.no_grad():
+                        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=img_embeds)['sample']
+                    # noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=img_embeds)['sample']
+
+                    # perform guidance
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    
+                    latents, pred_x0 = self.step(noise_pred, t, latents)
+            return latents, pred_x0
+        
+        latents, pred_x0 = sample(latents_masked_images, latents_masks, latents, img_embeds, guidance_scale)
+
         # decode
         imgs = self.decode_latents_grad(latents) # [1, 3, 512, 512]
-
+        # imgs = torch.einsum('bj,nbik->njik', self.linear_rgb_estimator, latents) # [1, 3, 64, 64]
+        
         # denormalize imgs
-        imgs = self.denorm_img(imgs)
+        imgs = imgs * 0.5 + 0.5
+        # imgs = self.denorm_img(imgs)
         return imgs
 
     def get_timesteps(self, num_inference_steps, strength):
@@ -437,24 +487,24 @@ class PaintbyExample(nn.Module):
         timesteps = self.scheduler.timesteps[t_start:]
         return timesteps, num_inference_steps - t_start
     
-    def approx_latent2rgb(self, example_images):
+    def approx_latent2rgb(self, ref_img):
         import numpy as np
         from tqdm import tqdm
-        rs_example_images = example_images.resize((512,512))
-        np_example_images = np.array(rs_example_images).transpose(2,0,1)
-        th_example_images = torch.tensor(np_example_images)[None] / 255.
-        th_example_images = th_example_images.to(self.device)
-        latents_example_images = self.encode_imgs(th_example_images) # torch.Size([1, 4, 64, 64])
+        rs_ref_img = ref_img.resize((512,512))
+        np_ref_img = np.array(rs_ref_img).transpose(2,0,1)
+        th_ref_img = torch.tensor(np_ref_img)[None] / 255.
+        th_ref_img = th_ref_img.to(self.device)
+        latents_ref_img = self.encode_imgs(th_ref_img) # torch.Size([1, 4, 64, 64])
         const = 1 / 0.18215 
-        latents_example_images = latents_example_images[0] # torch.Size([4, 64, 64])
+        latents_ref_img = latents_ref_img[0] # torch.Size([4, 64, 64])
         # homogeneous coordinate
         
-        down_example_images = transforms.ToTensor()(example_images.resize((64,64))) # torch.Size([1, 3, 64, 64])
-        down_example_images = down_example_images.to(self.device) ### 0 ~ 1 range
-        # down_example_images = (down_example_images * 2.0) - 1.0  ### -1 ~ 1 range
+        down_ref_img = transforms.ToTensor()(ref_img.resize((64,64))) # torch.Size([1, 3, 64, 64])
+        down_ref_img = down_ref_img.to(self.device) ### 0 ~ 1 range
+        # down_ref_img = (down_ref_img * 2.0) - 1.0  ### -1 ~ 1 range
         
         
-        latents_example_images = torch.cat([latents_example_images, torch.ones(1,64,64).to(self.device)])
+        latents_ref_img = torch.cat([latents_ref_img, torch.ones(1,64,64).to(self.device)])
         
         # new_mat = torch.tensor([[ 0.2135,  0.1282,  0.1321],[ 0.0707,  0.2170,  0.1689],[-0.1449,  0.1692,  0.1697],[-0.1179, -0.2380, -0.2821]], device='cuda:0', requires_grad=True)
         # new_mat = torch.tensor([[ 0.2117,  0.1266,  0.1307],[ 0.0700,  0.2151,  0.1670],[-0.1429,  0.1672,  0.1677],[-0.1161, -0.2360, -0.2801]], device='cuda:0', requires_grad=True)
@@ -462,9 +512,9 @@ class PaintbyExample(nn.Module):
         
         def svae_image(decode_latents, norm=True):
             if norm:
-                vis = torch.cat([(decode_latents*0.5) + 0.5, (down_example_images*0.5)+0.5], dim = -1)
+                vis = torch.cat([(decode_latents*0.5) + 0.5, (down_ref_img*0.5)+0.5], dim = -1)
             else:
-                vis = torch.cat([decode_latents, down_example_images], dim = -1)
+                vis = torch.cat([decode_latents, down_ref_img], dim = -1)
             transforms.ToPILImage()(vis).save('tt.png')
             
         def optimize_new_mat(new_mat, latent, lr=1e-3, L=1, nl=0, max_itr=2000):
@@ -481,11 +531,11 @@ class PaintbyExample(nn.Module):
                 optimizer.zero_grad()
                 decode_latents = torch.einsum('bj,bik->jik', new_mat, latent)
                 if L==1:
-                    loss = criterionL1(decode_latents, down_example_images.detach())
+                    loss = criterionL1(decode_latents, down_ref_img.detach())
                 elif L==2:
-                    loss = F.mse_loss(decode_latents, down_example_images.detach())
+                    loss = F.mse_loss(decode_latents, down_ref_img.detach())
                 else:
-                    loss = F.mse_loss(decode_latents, down_example_images.detach()) + criterionL1(decode_latents, down_example_images.detach())
+                    loss = F.mse_loss(decode_latents, down_ref_img.detach()) + criterionL1(decode_latents, down_ref_img.detach())
                 if nl:
                     loss += new_mat.norm()
                 loss.backward()
@@ -498,22 +548,22 @@ class PaintbyExample(nn.Module):
         
         
         # import pdb; pdb.set_trace()
-        # R = torch.linalg.lstsq(latents_example_images.reshape(-1,4), down_example_images[0].reshape(-1,1)).solution
+        # R = torch.linalg.lstsq(latents_ref_img.reshape(-1,4), down_example_images[0].reshape(-1,1)).solution
         
-        # # X = torch.linalg.pinv(latents_example_images) @ down_example_images
-        # pinv_l = torch.linalg.pinv(latents_example_images)
+        # # X = torch.linalg.pinv(latents_ref_img) @ down_example_images
+        # pinv_l = torch.linalg.pinv(latents_ref_img)
         # X = torch.einsum('jbk,ibk->ji', pinv_l, down_example_images)
-        # image = torch.einsum('bj,bik->jik', X, latents_example_images)
-        # svae_image(torch.einsum('bj,bik->jik', X, latents_example_images), 0)
+        # image = torch.einsum('bj,bik->jik', X, latents_ref_img)
+        # svae_image(torch.einsum('bj,bik->jik', X, latents_ref_img), 0)
 
-        # R_img = torch.einsum('bj,bik->jik', R, latents_example_images)
+        # R_img = torch.einsum('bj,bik->jik', R, latents_ref_img)
         # vis = torch.cat([(R_img*0.5) + 0.5, (down_example_images[2][None]*0.5)+0.5], dim = -1)
         # transforms.ToPILImage()(vis).save('tt.png')
-        # svae_image(torch.einsum('bj,bik->jik', R, latents_example_images), 0)
+        # svae_image(torch.einsum('bj,bik->jik', R, latents_ref_img), 0)
         
-        new_mat = optimize_new_mat(new_mat, latents_example_images, lr=1e-4, L=3, nl=1, max_itr=1000)
-        # svae_image(torch.einsum('bj,bik->jik', new_mat-n_linear, latents_example_images), 0)
-        # svae_image(torch.einsum('bj,bik->jik', optimize_new_mat(new_mat, lr=1e-4, L=2, max_itr=2000), latents_example_images), 0)
+        new_mat = optimize_new_mat(new_mat, latents_ref_img, lr=1e-4, L=3, nl=1, max_itr=1000)
+        # svae_image(torch.einsum('bj,bik->jik', new_mat-n_linear, latents_ref_img), 0)
+        # svae_image(torch.einsum('bj,bik->jik', optimize_new_mat(new_mat, lr=1e-4, L=2, max_itr=2000), latents_ref_img), 0)
         
         # _linear = torch.cat([self.linear_rgb_estimator, torch.ones(1,3).cuda()]).requires_grad_(True)
         # n_linear = optimize_new_mat(_linear, lr=1e-3, L=3, nl=1, max_itr=10000)
@@ -525,24 +575,26 @@ class PaintbyExample(nn.Module):
         # new_mat = optimize_new_mat(new_mat, lr=1e-5)
         import pdb;pdb.set_trace()
         # new_linear = torch.tensor([[ 0.2960,  0.2050,  0.2060],[ 0.1850,  0.2840,  0.1710],[-0.1560,  0.1910,  0.2660],[-0.1820, -0.2690, -0.4710],[ 0.1753,  0.7383,  0.6385]], device='cuda:0', requires_grad=True)
-        # svae_image(torch.einsum('bj,bik->jik', new_mat, latents_example_images))
-        # svae_image(torch.einsum('bj,bik->jik', new_linear, latents_example_images))
-        # svae_image(torch.einsum('bj,bik->jik', new_mat*.6+_linear*0.2, latents_example_images))
+        # svae_image(torch.einsum('bj,bik->jik', new_mat, latents_ref_img))
+        # svae_image(torch.einsum('bj,bik->jik', new_linear, latents_ref_img))
+        # svae_image(torch.einsum('bj,bik->jik', new_mat*.6+_linear*0.2, latents_ref_img))
         return
     
     def train_step(self, 
-                   inputs,              # latent
-                   input_masks,         # latent mask
-                   example_images,      # exampler image PIL.Image
+                   inputs,
+                   input_masks,
+                   ref_img,
+                   ref_img_tensor,
                    guidance_scale=100,
                    use_clip = False,
-                   convert = False,
+                   clip_model= None,
                    ):
         """
         Args
-            inputs (torch.Tensor):          [N, 4, 64, 64], rendered latent image
-            input_masks (torch.Tensor):     [N, 1, 64, 64], rendered latent image
-            example_images (PIL.Image):     examplar image
+            inputs (torch.Tensor):          [N, 4, 64, 64], rendered latent
+            input_masks (torch.Tensor):     [N, 1, 64, 64], rendered latent mask
+            ref_img (PIL.Image):            reference image path
+            ref_img_tensor (torch.Tensor):  [N, 1, 512, 512],  reference image
         """
         if not self.latent_mode:
             # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
@@ -550,7 +602,8 @@ class PaintbyExample(nn.Module):
             latents = self.encode_imgs(pred_rgb_512)
         else:
             latents = inputs
-            
+        
+        # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
         t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=self.device)
         
         masks         = 1 - input_masks
@@ -560,9 +613,9 @@ class PaintbyExample(nn.Module):
         
         
         # #### test!!!
-        # self.approx_latent2rgb(example_images)
+        # self.approx_latent2rgb(ref_img)
             
-        # # transforms.ToPILImage()(latents_example_images[0]).save('tt.png')
+        # # transforms.ToPILImage()(latents_ref_img[0]).save('tt.png')
         # vis = torch.cat([inputs[0], latents_masked_images[0], torch.cat([masks[0], masks[0], masks[0], masks[0]], dim=0)], dim=1)
         # # transforms.ToPILImage()(latents[0]).save('tt.png')
         # # transforms.ToPILImage()(latents_masked_images[0]).save('tt.png')
@@ -572,13 +625,8 @@ class PaintbyExample(nn.Module):
 
         
         # --------------------------------------------------------------
-        # image clip embedding
-        # example_images.min() -1.7923
-        # example_images.max() 2.1459 
-        # example_images.mean() 1.0935 
-        # example_images.std() 1.2889
-        example_images = self.clip_image_process(example_images)
-        img_embeds, neg_img_embeds = self.image_encoder(example_images, return_uncond_vector=True)
+        ref_img_clip = self.clip_image_process(ref_img)
+        img_embeds, neg_img_embeds = self.image_encoder(ref_img_clip, return_uncond_vector=True)
         image_embeddings = torch.cat([neg_img_embeds, img_embeds])
         
         # predict the noise residual with unet, NO grad!
@@ -600,24 +648,20 @@ class PaintbyExample(nn.Module):
             ### UNet2DModel,
             # noise_pred = self.unet(latent_model_input, t).sample
             ### UNet2DConditionModel, 
-            noise_pred = self.unet(
-                latent_model_input,
-                t,
-                encoder_hidden_states=image_embeddings)['sample']
-            
+            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=image_embeddings)['sample']
         
-        # perform guidance (high scale from paper!)
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            # perform guidance (high scale from paper!)
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        # if (t / self.num_train_timesteps) <= 0.4:
-        if use_clip:
+        # if use_clip:
+        if use_clip and (t / self.num_train_timesteps) <= 0.4:
             self.scheduler.set_timesteps(self.num_train_timesteps)
             de_latents = self.scheduler.step(noise_pred, t, latents_noisy)['prev_sample']
-            # de_latents = de_latents.detach().requires_grad_()
-            imgs = self.decode_latents(de_latents)
-            imgs = self.denorm_img(imgs)
-            return imgs
+            imgs = self.denorm_img(self.decode_latents(de_latents))
+            # import pdb;pdb.set_trace()
+            loss = 10 * self.img_clip_loss(clip_model, imgs, ref_img_tensor)
+            return loss
                     
         else:        
             # # clip grad for stable training?       
