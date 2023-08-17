@@ -263,8 +263,7 @@ class StableDiffusion(nn.Module):
 
             return latents
 
-        depth_mask = F.interpolate(depth_mask, size=(64, 64), mode='bicubic',
-                                   align_corners=False)
+        depth_mask = F.interpolate(depth_mask, size=(64, 64), mode='bicubic', align_corners=False)
         masked_latents = None
         if inputs is None:
             latents = None
