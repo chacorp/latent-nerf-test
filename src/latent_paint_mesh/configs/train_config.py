@@ -15,7 +15,8 @@ class RenderConfig:
     # training camera radius range
     # radius_range: Tuple[float, float] = (1.45, 1.75)
     # radius_range: Tuple[float, float] = (0.8, 1.2)
-    radius_range: Tuple[float, float] = (1.0, 1.5)
+    # radius_range: Tuple[float, float] = (1.0, 1.2)
+    radius_range: Tuple[float, float] = (1.0, 1.2)
     # Set [0,angle_overhead] as the overhead region
     angle_overhead: float = 40
     # Define the front angle region
@@ -45,7 +46,7 @@ class GuideConfig:
     guidance_scale: float = 7.5
     
     # Scale of mesh in 1x1x1 cube
-    shape_scale: float = 0.6
+    shape_scale: float = 0.8
     # height of mesh
     dy: float = 0.25
     # dy: float = 0.7
