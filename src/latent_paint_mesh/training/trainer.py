@@ -45,6 +45,22 @@ class Trainer:
         self.clip_model, self.clip_preprocess = self.init_clip()
         self.mesh_model         = self.init_mesh_model()
         self.diffusion          = self.init_diffusion()
+        
+        
+        self.transform          = self.get_transform()
+        self.text_z             = self.ref_text_embeddings()
+        
+        ### reference image
+        self.ref_image, self.ref_image_tensor, self.ref_image_embeds, self.ref_sampled_texture = self.get_image()
+        
+        with torch.no_grad():
+            ref_samp_tex_encode = self.diffusion.encode_imgs(self.ref_sampled_texture)
+            # noise = torch.randn_like(ref_samp_tex_encode)
+            # ref_samp_tex_encode = ref_samp_tex_encode * 0.7 + noise * 0.3
+        ref_samp_tex_encode.requires_grad = True        
+        self.mesh_model.texture_img = nn.Parameter(ref_samp_tex_encode)
+        
+        
         self.optimizer          = self.init_optimizer()
         self.dataloaders        = self.init_dataloaders()
         
@@ -56,16 +72,7 @@ class Trainer:
         #     self.normalize_clip = lambda x, mu, std: (x - mu) / std
         ### depricated ####################################################################
         
-        self.transform          = self.get_transform()
         
-        # self.text_z             = self.calc_text_embeddings()
-        self.text_z             = self.ref_text_embeddings()
-        # self.image_z            = self.calc_image_embeddings()
-        # self.image_z, self.image= self.calc_image_embeddings()
-        # self.image_z            = self.ref_image_embeddings()
-        
-        ### reference image
-        self.ref_image, self.ref_image_tensor, self.ref_image_embeds = self.get_image()
         
         self.ref_pose           = self.get_reference_pose()
         self.criterionL1        = nn.L1Loss()
@@ -250,9 +257,14 @@ class Trainer:
 
     def get_image(self) -> torch.Tensor:
         image = Image.open(self.cfg.guide.image).convert('RGB')
-        image_tensor = self.transform(image)[None].to(self.device) 
+        image_tensor = self.transform(image)[None].to(self.device)
         image_embeds = self.clip_image_embeddings(image)
-        return image, image_tensor, image_embeds
+        
+        image_sampled = Image.open(self.cfg.guide.sampled_texture).convert('RGB')
+        image_sampled = image_sampled.resize((512,512), resample=Image.Resampling.LANCZOS)        
+        image_sampled = transforms.ToTensor()(image_sampled)[None].to(self.device)
+        
+        return image, image_tensor, image_embeds, image_sampled
     
     def get_transform(self):
         return  transforms.Compose([
@@ -283,9 +295,9 @@ class Trainer:
         return optimizer
     
     def init_optimizer_disp(self) -> Optimizer:
-        # return torch.optim.Adam([self.mesh_model.displacement], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
+        return torch.optim.Adam([self.mesh_model.displacement], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
         # return torch.optim.Adam([self.mesh_model.xi], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
-        return torch.optim.Adam([*self.mesh_model.MLP.parameters()], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
+        # return torch.optim.Adam([*self.mesh_model.MLP.parameters()], lr=self.cfg.optim.disp_lr, betas=(0.9, 0.99), eps=1e-15)
 
     def init_dataloaders(self) -> Dict[str, DataLoader]:
         train_dataloader = ViewsDataset(self.cfg.render, device=self.device, type='train', size=100).dataloader()
@@ -520,8 +532,8 @@ class Trainer:
                 
                 # CLIPD = self.train_step % 10 == 1
                 # CLIPD = np.random.uniform(0, 1) < 0.5
-                # CLIPD = False
-                CLIPD = True
+                CLIPD = False
+                # CLIPD = True
                 
                 use_clip = True
                 log = np.random.uniform(0, 1) < 0.05
@@ -557,8 +569,8 @@ class Trainer:
                 ## ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L31
                 
                 # displacement = self.mesh_model.Linv.mm(self.mesh_model.xi)
-                displacement = self.mesh_model.MLP(self.mesh_model.init_lap)
-                # displacement = self.mesh_model.displacement
+                # displacement = 0 # self.mesh_model.MLP(self.mesh_model.init_lap)
+                displacement = self.mesh_model.displacement
                 reg_loss = torch.mean(torch.mean(displacement[None]**2, axis=1), axis=1)
                 reg_loss = (10. ** self.cfg.optim.reg_weight) * reg_loss # / (1 + (step_weight))
                 
@@ -588,7 +600,8 @@ class Trainer:
 
                 # if np.random.uniform(0, 1) < 0.05:
                 # if log and not CLIPD:
-                if log:
+                # if log:
+                if False:
                     # not pixelwise loss :: 'pred_rgbs' should be latent (4 channel)
                     # Randomly log rendered images throughout the training
                     logger.info('view: theta={}, phi={}, radius={}'.format(data['theta'], data['phi'], data['radius']))
@@ -695,18 +708,51 @@ class Trainer:
         
         return pred_rgb, lap_loss, loss_guidance
 
+    
+    # Hard coded for experiment
+    def get_camera_pose(self, 
+                        radius = 1.2, 
+                        thetas = 60.0, 
+                        phis   = -20, # minus left plus right
+                       ):
+        ## sphere
+        # radius = 1.60
+        ## SMPL
+        dirs, thetas, phis, radius = circle_poses(self.device, radius=radius, theta=thetas, phi=phis)
+        data = {
+            'dir'    : dirs,
+            'theta'  : thetas,
+            'phi'    : phis,
+            'radius' : radius,
+        }
+        return data
+    
     def train_render_text(self, data: Dict[str, Any]):
-        # theta    = data['theta']
-        # phi      = data['phi']
-        # radius   = data['radius']
-        theta       = self.ref_pose['theta']
-        phi         = self.ref_pose['phi']
-        radius      = self.ref_pose['radius']
-
-        outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius)
+        theta    = data['theta']
+        phi      = data['phi']
+        radius   = data['radius']
+        # theta       = self.ref_pose['theta']
+        # phi         = self.ref_pose['phi']
+        # radius      = self.ref_pose['radius']
         
-        # pred_rgb = self.diffusion.decode_latents(outputs['image'])
-        # transforms.ToPILImage()(pred_rgb[0]).save('test.png')
+        # outputs  = self.mesh_model.render(theta=theta, phi=phi, radius=radius, dims=(64,64))
+        
+        import pdb;pdb.set_trace()
+        
+#         output_list  = [self.mesh_model.render(theta=theta, phi=self.get_camera_pose(phis=i)['phi'], radius=radius, dims=(128,128)) for i in range(0, 360, 30)]
+#         import pickle
+                
+#         # save
+#         with open('data.pickle', 'wb') as f: pickle.dump(output_list, f)
+#             # pickle.dump(data, f, pickle.HIGHEST_PROTOCOL)
+#             pickle.dump(output_list, f)
+
+#         # load
+#         with open('data.pickle', 'rb') as f:
+#             data_ = pickle.load(f)
+            
+        pred_rgb = self.diffusion.decode_latents(outputs['image'])
+
         
         ## rendered w/ current texture
         pred_rgb        = outputs['image']      # [B, 3, H, W]
@@ -722,96 +768,167 @@ class Trainer:
             text_z = self.text_z
         
         ### noise guidence
-        ref_encode = self.diffusion.encode_imgs(self.ref_image_tensor*0.5+0.5)
+#         ref_encode = self.diffusion.encode_imgs(self.ref_image_tensor*0.5+0.5)
         
-        noise = torch.randn_like(ref_encode)
-        # latent_gray = torch.tensor([0.9071, -0.7711,  0.7437,  0.1510])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
-        latent_gray = torch.tensor([-0.0012,  0.0034,  0.0028,  0.0033])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
-        latent_white = torch.tensor([2.0595,  1.2667,  0.0866, -1.0816])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+#         noise = torch.randn_like(ref_encode)
+#         # latent_gray = torch.tensor([0.9071, -0.7711,  0.7437,  0.1510])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+#         latent_gray = torch.tensor([-0.0012,  0.0034,  0.0028,  0.0033])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+#         latent_white = torch.tensor([2.0595,  1.2667,  0.0866, -1.0816])[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
         
-        latent_mask = torch.ones_like(pred_rgb) * latent_gray
-        pred_rgb = pred_rgb * pred_rgb_mask
-        # pred_rgb = latent_mask * (1 - pred_rgb_mask) + pred_rgb * pred_rgb_mask
-        noise_mask = noise * pred_rgb_mask
+#         latent_mask = torch.ones_like(pred_rgb) * latent_gray
+#         pred_rgb = pred_rgb * pred_rgb_mask
+#         # pred_rgb = latent_mask * (1 - pred_rgb_mask) + pred_rgb * pred_rgb_mask
+#         noise_mask = noise * pred_rgb_mask
         
-        pred_rgb_mask_4 = pred_rgb_mask.repeat(1,4,1,1)
-        ## forward with text-embedding
+#         pred_rgb_mask_4 = pred_rgb_mask.repeat(1,4,1,1)
+
+        ### forward with text-embedding -------------------------------------------------------------------------
         # latents = self.diffusion.produce_latents(text_z, latents=noise)
         # latents = self.diffusion.produce_latents(text_z, latents=ref_encode)
         # latents = self.diffusion.produce_latents(text_z, latents=pred_rgb)
+        ###------------------------------------------------------------------------------------------------------
         
-        # inverting latent to noise
-        latents_xt, latents_list = self.diffusion.invert(ref_encode, text_z, guidance_scale=1.0, return_intermediates=True)
-        # latents_xt, latents_list = self.diffusion.invert(ref_encode, text_z, return_intermediates=True)
-        latents_list = list(reversed(latents_list))
-        
-        ## 0: noise ~~~ 50(num_inference_steps): image
+        ### inverting latent to noise ---------------------------------------------------------------------------
+        # latents_xt, latents_list = self.diffusion.invert(ref_encode, text_z, guidance_scale=1.0, return_intermediates=True)
+        # # latents_xt, latents_list = self.diffusion.invert(ref_encode, text_z, return_intermediates=True)
+        # latents_list = list(reversed(latents_list))
+        ###------------------------------------------------------------------------------------------------------
                 
-        # self.diffusion.scheduler_inv.timesteps[num]
-        # self.diffusion.scheduler.timesteps[num]
+        ### 0: noise ~~~ 50(num_inference_steps): image        
+        # num = 40
         
-        num = 10
-        ### reconstruction
+        ### inversion -> reconstruction -------------------------------------------------------------------------
         # latents_ = self.diffusion.produce_latents(text_z, latents=latents_list[num], start=num) 
+        # transforms.ToPILImage()(self.diffusion.decode_latents(latents_)[0]).save('test_samp-inv-{:03}.png'.format(num))
+        ###------------------------------------------------------------------------------------------------------
+        
         """
             TODO:
             - [v] DDIM inversion
             - [v] null-text inversion : get optimal 'text_z' (uncond_embeddings_list) - carefull with the guidance_scale
-            - [?] better initialization for texture ...? 
-            - [ ] denoise with geometry contraint (follow 'pred_rgb')
+            - [v] better initialization for texture ...? 
+                - invert image and sample image noise to texture space
+                - just encode sampled_texture from SamplerNet
+            - [ ] denoise with geometry contraint (follow 'pred_rgb') - use normal and lighting
         """
-        uncond_embeddings_list = self.diffusion.null_optimization(latents_list, text_z, guidance_scale=7.5)
-        import pdb;pdb.set_trace()
+        # ref_ST = transforms.ToTensor()(Image.open('/source/sihun/SMPL-TEXTure/input/rp_aaron_posed_005_sampled.png'))[None].cuda()
+        # ref_ST_encode = self.diffusion.encode_imgs(ref_ST)
+        # transforms.ToPILImage()(self.diffusion.decode_latents(ref_ST_encode)[0]).save('test_samp-ST.png')
+        
+        # ref_DP = Image.open('/source/sihun/SMPL-TEXTure/input/rp_aaron_posed_005_symmetry.png')
+        # ref_DP = transforms.ToTensor()(ref_DP)[None].cuda() # 0 ~ 1
+        # ref_DP_encode = self.diffusion.encode_imgs(ref_DP)
+        
+        # sample_grid = Image.open('/source/sihun/SMPL-TEXTure/input/rp_aaron_posed_005_sampling_grid.png')
+        # sample_grid = sample_grid.resize((64, 64), resample=Image.Resampling.LANCZOS)
+        # sample_grid = transforms.ToTensor()(sample_grid)
+        # sample_grid = (sample_grid * 2.0 - 1.0)[None].cuda() # [1, 3, H, W]
+        # sample_grid_premute = sample_grid.permute(0,2,3,1)
+        # sample_grid_premute_ori = sample_grid.permute(0,2,3,1)
+        
+        # import pdb;pdb.set_trace()
+        # transforms.ToPILImage()(sample_grid_premute.permute(0,3,1,2)[0]).save('test_samp-ref_grid_down.png')
+        # transforms.ToPILImage()(ref_DP_encode[0]).save('test_samp-ref_DP_enc.png')
+        # transforms.ToPILImage()(ref_samp_tex[0]).save('test_samp-ref_samp_tex_enc.png')
+        
+#         transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb)[0]).save('train_samp-pred_rgb.png')
+
+#         latents_ = self.diffusion.produce_latents(text_z, latents=pred_rgb, start=num)
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents_)[0]).save('test_samp-step-{:03}.png'.format(num))
+        
+#         ## map noise to UV space:: result should be >>> torch.Size([1, 4, 64, 64])
+#         samp_tex = F.grid_sample(ref_DP.cuda(), sample_grid_premute[..., :2], align_corners=True)
+#         ref_samp_tex = F.grid_sample(ref_DP_encode.cuda(), sample_grid_premute[..., :2], align_corners=True)
+        ref_samp_tex_ori = F.grid_sample(ref_DP_encode.cuda(), sample_grid_premute_ori[..., :2], align_corners=True)
+        upSample = nn.Upsample(scale_factor=0.5, mode='area')
+        ref_samp_tex_ori_down = upSample(ref_samp_tex_ori).cuda()
+        transforms.ToPILImage()(self.diffusion.decode_latents(ref_samp_tex_ori_down)[0]).save('test_samp-ref_samp_tex_ori_down.png')
+#         # latent_DP = F.grid_sample(ref_DP_encode, sample_grid_premute_[..., :2], align_corners=True)
+#         latent_DP = F.grid_sample(ref_DP_encode, sample_grid_premute[..., :2], align_corners=True)
+        
+        
+        
+        
+        
+#         transforms.ToPILImage()(self.diffusion.decode_latents(ref_DP_encode)[0]).save('test_samp-ref_DP_e-{:03}.png'.format(num))
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latent_DP)[0]).save('test_samp-ref_DP-{:03}.png'.format(num))
+#         transforms.ToPILImage()(self.diffusion.decode_latents(ref_samp_tex)[0]).save('test_samp-ref_samp_tex.png')
+        
+        
+#         ref_s = F.grid_sample(self.ref_image_tensor, sample_grid[..., :2], align_corners=True) # torch.Size([1, 4, 64, 64])
+        
+#         latents_s = self.diffusion.produce_latents(text_z, latents=latent_s, start=num)
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents_s)[0]).save('test_samp-map-{:03}.png'.format(num))
+        
+#         transforms.ToPILImage()(self.diffusion.decode_latents(ref_encode)[0]).save('test_samp-ref-{:03}.png'.format(num))
+        
+#         transforms.ToPILImage()(latent_s[0]).save('test_samp-map-z-{:03}.png'.format(num))
+#         transforms.ToPILImage()(ref_s[0]).save('test_samp-map-ref-{:03}.png'.format(num))
+        
+#         transforms.ToPILImage()(self.ref_image_tensor[0]).save('test_samp-map-ref-{:03}.png'.format(num))
+#         transforms.ToPILImage()(samp_tex[0]).save('test_samp-tex-ref-{:03}.png'.format(num))
+        
+#         outputs  = self.mesh_model.render_with_given_texture(theta=theta, phi=phi, radius=radius, texture_img=latent_s, dims=64)
+        
+#         pred_rgb        = outputs['image']      # [B, 3, H, W]
+#         pred_rgb_mask   = outputs['mask']       # [B, 1, H, W]
+#         lap_loss        = outputs['lap_loss']
+        
+        
+#         transforms.ToPILImage()(self.diffusion.decode_latents(outputs['image'])[0]).save('test_samp-10.png')
+        
+#         ### null-text inversion:: a.k.a optimizing negative prompt
+#         # uncond_embeddings_list = self.diffusion.null_optimization(latents_list, text_z, guidance_scale=7.5)
 
 
-        # latents = self.diffusion.produce_latents(text_z, latents=latents_list[num], guidance_scale=7.5, start=num)
-        # latents = self.diffusion.produce_latents(text_z, latents=latents_list[num], guidance_scale=1.0, start=num)
-        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-xt.png')
+#         # latents = self.diffusion.produce_latents(text_z, latents=latents_list[num], guidance_scale=7.5, start=num)
+#         # latents = self.diffusion.produce_latents(text_z, latents=latents_list[num], guidance_scale=1.0, start=num)
+#         # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-xt.png')
         
-        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-st-0.png')
-        transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb)[0]).save('test_dummy-pred_rgb.png')
-        transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb_mask_4)[0]).save('test_dummy-pred_rgb.png')
-        transforms.ToPILImage()(self.diffusion.decode_latents(noise_mask)[0]).save('test_dummy-pred_rgb.png')
-        # transforms.ToPILImage()(pred_rgb_mask[0]).save('test_dummy-st-0.png')
+#         # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-st-0.png')
+#         transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb)[0]).save('test_dummy-pred_rgb.png')
+#         transforms.ToPILImage()(self.diffusion.decode_latents(pred_rgb_mask_4)[0]).save('test_dummy-pred_rgb.png')
+#         transforms.ToPILImage()(self.diffusion.decode_latents(noise_mask)[0]).save('test_dummy-pred_rgb.png')
+#         # transforms.ToPILImage()(pred_rgb_mask[0]).save('test_dummy-st-0.png')
         
-        # latents_st = self.diffusion.produce_latents(text_z, latents=pred_rgb, start=num)
-        # transforms.ToPILImage()(self.diffusion.decode_latents(latents_st)[0]).save('test_dummy-st-{}.png'.format(num))
+#         # latents_st = self.diffusion.produce_latents(text_z, latents=pred_rgb, start=num)
+#         # transforms.ToPILImage()(self.diffusion.decode_latents(latents_st)[0]).save('test_dummy-st-{}.png'.format(num))
         
-        #### anti-guidance
-        # latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guide_latents_list=latents_list, clip_model=self.clip_model, start=num, beta=3.0)
-        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-ag-{}-b05-8.png'.format(num))
+#         #### anti-guidance
+#         # latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guide_latents_list=latents_list, clip_model=self.clip_model, start=num, beta=3.0)
+#         # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-ag-{}-b05-8.png'.format(num))
         
-        # latents = self.diffusion.produce_latents_guide(text_z, latents=latents_list[num], guide_latents_list=latents_list, clip_model=self.clip_model, start=num, beta=0)
-        latents = self.diffusion.produce_latents_guide(text_z, latents=latents_list[num], guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+#         # latents = self.diffusion.produce_latents_guide(text_z, latents=latents_list[num], guide_latents_list=latents_list, clip_model=self.clip_model, start=num, beta=0)
+#         latents = self.diffusion.produce_latents_guide(text_z, latents=latents_list[num], guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
         
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-xt.png'.format(num))
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-xt.png'.format(num))
         
-        latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+#         latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
         
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-pred_rgb.png'.format(num))
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-pred_rgb.png'.format(num))
         
-        latents = self.diffusion.produce_latents_guide(text_z, latents=noise_mask, guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+#         latents = self.diffusion.produce_latents_guide(text_z, latents=noise_mask, guidance_scale=7.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
         
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-noise_mask.png'.format(num))
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-noise_mask.png'.format(num))
         
-        latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guidance_scale=17.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
+#         latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guidance_scale=17.5, uncond_embeddings_list=uncond_embeddings_list, clip_model=self.clip_model, start=num, beta=0)
         
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-noise.png'.format(num))
-        # latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guide_latents=ref_encode, clip_model=self.clip_model, beta=10.)
-        # latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guide_latents_list=latents_list, clip_model=self.clip_model, beta=2)
-        # latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guide_latents=ref_encode, clip_model=self.clip_model)
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_dummy-null-{:02}-noise.png'.format(num))
+#         # latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guide_latents=ref_encode, clip_model=self.clip_model, beta=10.)
+#         # latents = self.diffusion.produce_latents_guide(text_z, latents=noise, guide_latents_list=latents_list, clip_model=self.clip_model, beta=2)
+#         # latents = self.diffusion.produce_latents_guide(text_z, latents=pred_rgb, guide_latents=ref_encode, clip_model=self.clip_model)
         
-        # torch.nn.MSELoss()(noise, noise_) / torch.norm(noise-ref_encode)
+#         # torch.nn.MSELoss()(noise, noise_) / torch.norm(noise-ref_encode)
         
-        # imgs = self.diffusion.decode_latents(latents)
-        # imgs = self.diffusion.decode_latents(ref_encode)
-        # imgs = self.diffusion.decode_latents(pred_rgb)
-        # transforms.ToPILImage()(latents_xt[0]).save('test_latents_xt.png')
-        # transforms.ToPILImage()(self.diffusion.decode_latents(latents_xt)[0]).save('test_latents_xt_ad.png')
-        # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_guide-aG-b2.0.png')        
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_guide_list-ad-w2.0.png')
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_recon.png')
-        transforms.ToPILImage()(self.diffusion.decode_latents(latents_xt)[0]).save('test_latents_xt.png')
+#         # imgs = self.diffusion.decode_latents(latents)
+#         # imgs = self.diffusion.decode_latents(ref_encode)
+#         # imgs = self.diffusion.decode_latents(pred_rgb)
+#         # transforms.ToPILImage()(latents_xt[0]).save('test_latents_xt.png')
+#         # transforms.ToPILImage()(self.diffusion.decode_latents(latents_xt)[0]).save('test_latents_xt_ad.png')
+#         # transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_guide-aG-b2.0.png')        
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_guide_list-ad-w2.0.png')
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents)[0]).save('test_latents_recon.png')
+#         transforms.ToPILImage()(self.diffusion.decode_latents(latents_xt)[0]).save('test_latents_xt.png')
         
         loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
 
