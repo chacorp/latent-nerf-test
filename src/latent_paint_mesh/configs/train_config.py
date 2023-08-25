@@ -32,6 +32,8 @@ class GuideConfig:
     # Guiding text prompt
     text: str
     image: str
+    sampled_texture: str
+    
     # The mesh to paint
     shape_path: str
     # Append direction to text prompts
@@ -93,13 +95,13 @@ class OptimConfig:
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
     # disp_lr: float = 5e-3
     # disp_lr: float = 1e-4
-    disp_lr: float = 1e-4 ## MLP
+    # disp_lr: float = 1e-4 ## MLP
     # disp_lr: float = 2e-5
-    # disp_lr: float = 5e-5
-    # lap_weight: float = 100.
-    # reg_weight: float = 10.
-    lap_weight: float = 1.
-    reg_weight: float = 1.
+    disp_lr: float = 5e-5 ## disp
+    lap_weight: float = 100.
+    reg_weight: float = 10.
+    # lap_weight: float = 1.
+    # reg_weight: float = 1.
 
 
 @dataclass
