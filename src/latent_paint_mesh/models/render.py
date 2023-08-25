@@ -56,8 +56,9 @@ class Renderer:
                                                               face_vertices_image, face_attributes)
 
         mask = (face_idx > -1).float()[..., None]
+        image_normals = face_normals[:, face_idx].squeeze(0)
 
-        return image_features.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2)
+        return image_features.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2), image_normals.permute(0, 3, 1, 2)
 
 
     def render_single_view_texture(self, verts, faces, uv_face_attr, texture_map, elev=0, azim=0, radius=2,
@@ -134,10 +135,11 @@ class Renderer:
             # print(image.shape, image_lighting.shape)
             image = image * image_lighting
             # image = torch.clamp(image, 0.0, 1.0) ## this is latent feature do not need cliping
+        image_normals = face_normals[:, face_idx].squeeze(0)
 
         if white_background:
             image += 1 * (1 - mask)
-        return image.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2)
+        return image.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2), image_normals.permute(0, 3, 1, 2)
 
     def render_single_view_texture_lighting(self, verts, faces, uv_face_attr, texture_map, elev=0, azim=0, radius=2,
                                    look_at_height=0.0, dims=None, white_background=False, disp=None):
@@ -187,4 +189,4 @@ class Renderer:
         image_lighting = image_lighting.repeat(1, C, 1, 1).permute(0, 2, 3, 1).to(self.device)
         image_lighting = image_lighting.clamp(0, 1)
         
-        return image_lighting.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2)
+        return image_lighting.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2), image_normals.permute(0, 3, 1, 2)
