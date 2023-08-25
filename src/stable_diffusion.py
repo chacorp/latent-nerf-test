@@ -76,8 +76,8 @@ class StableDiffusion(nn.Module):
 
         # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
         self.model_id = "openai/clip-vit-large-patch14"
-        self.tokenizer = CLIPTokenizer.from_pretrained(self.model_id)
-        self.text_encoder = CLIPTextModel.from_pretrained(self.model_id).to(self.device)
+        self.tokenizer = CLIPTokenizer.from_pretrained(self.model_id, cache_dir=cache_dir)
+        self.text_encoder = CLIPTextModel.from_pretrained(self.model_id, cache_dir=cache_dir).to(self.device)
         # self.image_encoder = None
         # self.image_processor = None        
         # self.image_processor = AutoProcessor.from_pretrained(self.model_id)
