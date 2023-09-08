@@ -11,12 +11,12 @@ class RenderConfig:
     # train_grid_size: int = 64
     train_grid_size: int = 256
     # Render height,width for evaluation
-    eval_grid_size: int = 512
+    eval_grid_size:  int = 512
     # training camera radius range
     # radius_range: Tuple[float, float] = (1.45, 1.75)
-    # radius_range: Tuple[float, float] = (0.8, 1.2)
     # radius_range: Tuple[float, float] = (1.0, 1.2)
-    radius_range: Tuple[float, float] = (1.0, 1.2)
+    radius_range: Tuple[float, float] = (1.4, 2.4)
+    thetas_range: Tuple[float, float] = (60, 110)
     # Set [0,angle_overhead] as the overhead region
     angle_overhead: float = 40
     # Define the front angle region
@@ -25,6 +25,7 @@ class RenderConfig:
     backbone: str = 'texture-mesh'
     # not used
     bg_white: bool = False
+    batch_size: int = 1
     
 @dataclass
 class GuideConfig:
@@ -48,10 +49,10 @@ class GuideConfig:
     guidance_scale: float = 7.5
     
     # Scale of mesh in 1x1x1 cube
-    shape_scale: float = 0.8
+    shape_scale: float = 1.0
     # height of mesh
-    dy: float = 0.25
-    # dy: float = 0.7
+    dy: float = 0.0
+    # dy_head: float = 0.2
     
     # texture image resolution
     texture_resolution=128
@@ -72,6 +73,8 @@ class OptimConfig:
     # Load existing model
     ckpt: Optional[str] = None
     
+    min_step: float = 0.5
+    max_step: float = 0.98
     ## Diffusion model
     use_SD: bool = False # if false use Paint-by-Example, if true use stable-diffusion
     use_opt_txt: bool = False # if True, use optimized text feature (opitimize guide.text closer to guide.image using CLIP loss)
