@@ -30,7 +30,7 @@ class TexturedMeshModel(nn.Module):
         self.dy = self.opt.guide.dy
         self.mesh_scale = self.opt.guide.shape_scale
         self.texture_resolution = texture_resolution
-
+        
         # linear rgb estimator from latents
         # https://discuss.huggingface.co/t/decoding-latents-to-rgb-without-upscaling/23204
         self.linear_rgb_estimator = torch.tensor([
@@ -41,11 +41,14 @@ class TexturedMeshModel(nn.Module):
             [-0.184, -0.271, -0.473],  # L4
         ]).to(self.device)
         self.latent_gray = torch.tensor(
-                [0.9071, -0.7711,  0.7437,  0.1510]
-            )[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
+            [0.9071, -0.7711,  0.7437,  0.1510]
+        )[None].unsqueeze(-1).unsqueeze(-1).to(self.device)
 
-        self.renderer = Renderer(device=self.device, dim=(render_grid_size, render_grid_size),
-                                 interpolation_mode=self.opt.guide.texture_interpolation_mode)
+        self.renderer = Renderer(
+            device=self.device, 
+            dim=(render_grid_size, render_grid_size),
+            interpolation_mode=self.opt.guide.texture_interpolation_mode,
+        )
         self.env_sphere, self.mesh = self.init_meshes()
         
         # self.MLP = MLP(input_dim=3).cuda()
@@ -224,21 +227,31 @@ class TexturedMeshModel(nn.Module):
             fp.write(f'Ns 0.000000 \n')
             fp.write(f'map_Kd {name}albedo.png \n')
     
-    def render(self, theta, phi, radius, decode_func=None, test=False, dims=None, use_decode=False):
+    def render(self, 
+               theta, 
+               phi, 
+               radius, 
+               decode_func=None, 
+               test=False, 
+               dims=None, 
+               use_decode=False,
+               is_body=True
+              ):
+        
         if test:
-            return self.render_test(theta, phi, radius, decode_func, dims=dims)
+            return self.render_test(theta, phi, radius, decode_func, dims=dims, is_body=is_body)
         else:
             if use_decode:
-                return self.render_train_with_decode(theta, phi, radius, decode_func, dims=dims)
+                return self.render_train_with_decode(theta, phi, radius, decode_func, dims=dims, is_body=is_body)
             else:
-                return self.render_train(theta, phi, radius, dims=dims)
+                return self.render_train(theta, phi, radius, dims=dims, is_body=is_body)
 
     def normalize_torch(self, V):
         ### torch
         V = (V-(V.max(0).values + V.min(0).values) * 0.5)/max(V.max(0).values - V.min(0).values)
         return V
 
-    def render_train(self, theta, phi, radius, dims):
+    def render_train(self, theta, phi, radius, dims, look_at_height=None, is_body=True):
         if self.latent_mode:
             texture_img = self.texture_img
             # background_sphere_colors = self.background_sphere_colors
@@ -253,9 +266,9 @@ class TexturedMeshModel(nn.Module):
         #     displacement = self.normalize_torch(displacement)
         displacement = 0 #self.MLP(self.init_lap)
         # displacement = displacement[None].norm(dim=0)
-        # import pdb; pdb.set_trace()
         # displacement = self.displacement
-        pred_features, mask, normal = self.renderer.render_single_view_texture(self.mesh.vertices,
+        # import pdb;pdb.set_trace()
+        pred_features, mask, normal, lighting = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.uv_face_attr,
                                                                        texture_img,
@@ -264,7 +277,8 @@ class TexturedMeshModel(nn.Module):
                                                                        radius         = radius,
                                                                        look_at_height = self.dy,
                                                                        dims           = dims,
-                                                                       disp           = displacement
+                                                                       disp           = displacement,
+                                                                       is_body        = is_body,
                                                                       )
         # pred_back, _ = self.renderer.render_single_view(self.env_sphere,
         #                                                 background_sphere_colors,
@@ -297,10 +311,10 @@ class TexturedMeshModel(nn.Module):
         # import pdb;pdb.set_trace()
         
         # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features, 'lap_loss': lap_loss}
-        return {'image': pred_features, 'mask': mask, 'lap_loss': lap_loss, 'normal': normal}
+        return {'image': pred_features, 'mask': mask, 'lap_loss': lap_loss, 'normal': normal, 'lighting': lighting}
         # return {'image': pred_map, 'mask': mask, 'background': pred_back, 'foreground': pred_features}
 
-    def render_test(self, theta, phi, radius, decode_func=None, dims=None):
+    def render_test(self, theta, phi, radius, decode_func=None, dims=None, look_at_height=None, is_body=True):
         if self.latent_mode:
             assert decode_func is not None, 'decode function was not supplied to decode the latent texture image'
             texture_img = decode_func(self.texture_img)
@@ -310,7 +324,7 @@ class TexturedMeshModel(nn.Module):
         # add displacement
         displacement = 0# self.MLP(self.init_lap)
         
-        pred_features, mask, normal = self.renderer.render_single_view_texture(self.mesh.vertices,
+        pred_features, mask, normal, lighting = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.uv_face_attr,
                                                                        texture_img,
@@ -320,12 +334,13 @@ class TexturedMeshModel(nn.Module):
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
                                                                        white_background=True,
-                                                                       disp=displacement
+                                                                       disp=displacement,
+                                                                       is_body=is_body,
                                                                       )
 
-        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask}
+        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'normal': normal, 'lighting': lighting}
     
-    def render_train_with_decode(self, theta, phi, radius, decode_func=None, dims=None):
+    def render_train_with_decode(self, theta, phi, radius, decode_func=None, dims=None, look_at_height=None, is_body=True):
         if self.latent_mode:
             assert decode_func is not None, 'decode function was not supplied to decode the latent texture image'
             texture_img = decode_func(self.texture_img)
@@ -334,9 +349,9 @@ class TexturedMeshModel(nn.Module):
             texture_img = self.texture_img_rgb_finetune
             background_sphere_colors = self.background_sphere_colors @ self.linear_rgb_estimator
         
-        displacement =0 
+        displacement = 0 
         
-        pred_features, mask, normal = self.renderer.render_single_view_texture(self.mesh.vertices,
+        pred_features, mask, normal, lighting = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.uv_face_attr,
                                                                        texture_img,
@@ -345,48 +360,51 @@ class TexturedMeshModel(nn.Module):
                                                                        radius=radius,
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
-                                                                       disp=displacement
+                                                                       disp=displacement,
+                                                                       is_body=is_body,
                                                                       )
         
         lap_loss = self.L.mm(self.mesh.vertices+displacement)
         lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
         
-        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
+        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss, 'normal': normal, 'lighting': lighting}
         # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
     
-    def render_train_with_light(self, theta, phi, radius, dims=None):
-        texture_img = self.texture_img
-        displacement = 0 #self.MLP(self.init_lap)
+#     def render_train_with_light(self, theta, phi, radius, dims=None, look_at_height=None, is_body=True):
+#         texture_img = self.texture_img
+#         displacement = 0 #self.MLP(self.init_lap)
         
-        pred_features, mask, normal = self.renderer.render_single_view_texture_lighting(self.mesh.vertices,
-                                                                       self.mesh.faces,
-                                                                       self.uv_face_attr,
-                                                                       texture_img,
-                                                                       elev=theta,
-                                                                       azim=phi,
-                                                                       radius=radius,
-                                                                       look_at_height=self.dy,
-                                                                       dims=dims,
-                                                                       disp=displacement,
-                                                                    )
+#         pred_features, mask, normal = self.renderer.render_single_view_texture_lighting(self.mesh.vertices,
+#                                                                        self.mesh.faces,
+#                                                                        self.uv_face_attr,
+#                                                                        texture_img,
+#                                                                        elev=theta,
+#                                                                        azim=phi,
+#                                                                        radius=radius,
+#                                                                        look_at_height=self.dy,
+#                                                                        dims=dims,
+#                                                                        disp=displacement,
+#                                                                        is_body=is_body,
+#                                                                     )
         
-        lap_loss = self.L.mm(self.mesh.vertices+displacement)
-        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
+#         lap_loss = self.L.mm(self.mesh.vertices+displacement)
+#         lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
         
-        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
+#         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss, 'normal': normal}
         # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
         
-    def render_with_given_texture(self, theta, phi, radius, texture_img, dims=None):
+    def render_with_given_texture(self, theta, phi, radius, texture_img, dims=None, look_at_height=None, is_body=True):
         displacement = 0 #self.MLP(self.init_lap)
-        pred_features, mask, normal = self.renderer.render_single_view_texture(self.mesh.vertices,
+        pred_features, mask, normal, lighting = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.uv_face_attr,
-                                                                       texture_img,
+                                                                       self.texture_img,
                                                                        elev=theta,
                                                                        azim=phi,
                                                                        radius=radius,
                                                                        look_at_height=self.dy,
                                                                        dims=dims,
                                                                        disp=displacement,
+                                                                       is_body=is_body,
                                                                     )
-        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask}
+        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'normal': normal, 'lighting': lighting}
