@@ -174,12 +174,15 @@ class TexturedMeshModel(nn.Module):
         v_np = v.cpu().numpy() # [N, 3]
         f_np = f.cpu().numpy() # [M, 3]
 
-        if self.latent_mode:
+        C = self.texture_img.shape[1]
+        # if self.latent_mode:
+        if C == 4:
             colors = guidance.decode_latents(self.texture_img).permute(0, 2, 3, 1).contiguous()
             if not self.opt.optim.use_SD:
                 colors = guidance.denorm_img(colors)
         else:
-            colors = self.texture_img_rgb_finetune.permute(0, 2, 3, 1).contiguous()
+            colors = self.texture_img.permute(0, 2, 3, 1).contiguous()
+            # colors = self.texture_img_rgb_finetune.permute(0, 2, 3, 1).contiguous()
 
         colors = colors[0].cpu().detach().numpy()
         colors = (colors * 255).astype(np.uint8)
@@ -393,12 +396,12 @@ class TexturedMeshModel(nn.Module):
 #         return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss, 'normal': normal}
         # return {'image': pred_map, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss}
         
-    def render_with_given_texture(self, theta, phi, radius, texture_img, dims=None, look_at_height=None, is_body=True):
+    def render_RGB(self, theta, phi, radius, texture_img, dims=None, look_at_height=None, is_body=True):
         displacement = 0 #self.MLP(self.init_lap)
         pred_features, mask, normal, lighting = self.renderer.render_single_view_texture(self.mesh.vertices,
                                                                        self.mesh.faces,
                                                                        self.uv_face_attr,
-                                                                       self.texture_img,
+                                                                       texture_img,
                                                                        elev=theta,
                                                                        azim=phi,
                                                                        radius=radius,
