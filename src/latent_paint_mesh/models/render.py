@@ -240,13 +240,6 @@ class Renderer:
         # image_features is a tuple in composed of the interpolated attributes of face_attributes
         texture_coords, mask, world_normals = image_features
         image = kal.render.mesh.texture_mapping(texture_coords, texture_map.repeat(B, 1, 1, 1), mode='bilinear')
-        
-        # if white_background == False:
-        #     import pdb; pdb.set_trace()
-        #     from torchvision.transforms import ToPILImage
-        #     ToPILImage()(image.permute(0, 3, 1, 2)[0]).save('tm.png')
-        #     ToPILImage()(mask.permute(0, 3, 1, 2)[0]).save('tm.png')
-        #     ToPILImage()((image * mask).permute(0, 3, 1, 2)[0]).save('tm.png')
         image = image * mask
         
         ## Lighting
@@ -261,7 +254,7 @@ class Renderer:
         # curr_light.requires_grad = True
         
         image_lighting = kal.render.mesh.spherical_harmonic_lighting(world_normals, self.lights).unsqueeze(0)
-        image_lighting = image_lighting.clamp(0, 1).permute(1, 0, 2, 3)
+        image_lighting = image_lighting.clamp(1e-8, 1).permute(1, 0, 2, 3)
         
             # C = world_normals.shape[-1]
             # image_lighting = image_lighting.repeat(1, C, 1, 1).permute(0, 2, 3, 1).to(self.device)
