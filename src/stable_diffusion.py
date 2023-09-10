@@ -52,6 +52,8 @@ class StableDiffusion(nn.Module):
                  concept_name   = None, 
                  latent_mode    = True,
                  cache_dir      = CACHE_DIR,
+                 min_step       = 0.02,
+                 max_step       = 0.98,
                  ):
         super().__init__()
 
@@ -66,8 +68,8 @@ class StableDiffusion(nn.Module):
         self.device = device
         self.latent_mode = latent_mode
         self.num_train_timesteps = 1000
-        self.min_step = int(self.num_train_timesteps * 0.02)
-        self.max_step = int(self.num_train_timesteps * 0.98)
+        self.min_step = int(self.num_train_timesteps * min_step)
+        self.max_step = int(self.num_train_timesteps * max_step)
 
         logger.info(f'loading stable diffusion with {model_name}...')
                 
@@ -118,6 +120,7 @@ class StableDiffusion(nn.Module):
             [-0.158, 0.189, 0.264],  # L3
             [-0.184, -0.271, -0.473],  # L4
         ]).to(self.device)
+        
         
         if concept_name is not None:
             self.load_concept(concept_name)
@@ -224,11 +227,12 @@ class StableDiffusion(nn.Module):
                       guidance_scale=7.5, 
                       latents=None,
                       out_tensor=False,
+                      start=0,
                       ):
         # Text embeds -> img latents
         # import pdb;pdb.set_trace()
         # with torch.no_grad():
-        latents = self.produce_latents(text_embeddings, height=size, width=size, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, latents=latents) # [1, 4, 64, 64]
+        latents = self.produce_latents(text_embeddings, height=size, width=size, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, latents=latents, start=start) # [1, 4, 64, 64]
         
         # Img latents -> imgs
         if out_tensor:
@@ -293,11 +297,9 @@ class StableDiffusion(nn.Module):
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
         
-        # if use_clip and (t / self.num_train_timesteps) <= 0.4:
-        # if use_clip and (t / self.num_train_timesteps) >= 0.4:
+        
         if use_clip:
             ### no gradient
-            # self.scheduler.set_timesteps(self.num_train_timesteps)
             # de_latents = self.scheduler.step(noise_pred, t, latents_noisy)['prev_sample']
             # de_latents = de_latents.detach().requires_grad_()
             
@@ -314,8 +316,8 @@ class StableDiffusion(nn.Module):
             # transforms.ToPILImage()(ref_img_tensor[0]*0.5+0.5).save('test.png')
         else:
             ## w(t), alpha_t * sigma_t^2
-            w = (1 - self.alphas[t])
-            # w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
+            # w = (1 - self.alphas[t])
+            w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
             grad = w * (noise_pred - noise)
 
             # clip grad for stable training?
@@ -324,12 +326,93 @@ class StableDiffusion(nn.Module):
 
             # manually backward, since we omitted an item in grad and cannot simply autodiff.
             # _t = time.time()
-            latents.backward(gradient=grad, retain_graph=True)
-            loss = torch.zeros([1]).to(self.device)
+            # latents.backward(gradient=grad, retain_graph=True)
+            # loss = torch.zeros([1]).to(self.device)
         # torch.cuda.synchronize(); print(f'[TIME] guiding: backward {time.time() - _t:.4f}s')
 
-        return loss # dummy loss value
+        # return loss # dummy loss value
+        return grad
 
+    def train_step_delta(self,
+           text_embeddings, 
+           inputs, 
+           delta_inputs,
+           ref_img_tensor=None,
+           guidance_scale=100,
+           use_clip=False,
+           clip_model=None,
+           start=40,
+       ):
+        """
+        Args
+            text_embeddings:    (n, 768), text feature after the projection
+            inputs (torch.Tensor):          [N, 4, 64, 64], rendered latent
+            ref_img_tensor (torch.Tensor):  [N, 1, 512, 512],  reference image
+        """
+        # interp to 512x512 to be fed into vae.
+               
+        # _t = time.time()
+        if not self.latent_mode:
+        # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
+            pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear', align_corners=False)
+            latents = self.encode_imgs(pred_rgb_512)
+        else:
+            latents = inputs
+            delta_latents = self.encode_imgs(delta_inputs)
+        # torch.cuda.synchronize(); print(f'[TIME] guiding: interp {time.time() - _t:.4f}s')
+
+        # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
+        t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=self.device)
+
+        # encode image into latents with vae, requires grad!
+        # _t = time.time()
+
+        # predict the noise residual with unet, NO grad!
+        # _t = time.time()
+        with torch.no_grad():
+            # add noise
+            noise = torch.randn_like(latents) # (64 x 64 x 4)
+            latents_noisy = self.scheduler.add_noise(latents, noise, t)
+            
+            # pred noise
+            latent_model_input = torch.cat([latents_noisy] * 2)
+            ### UNet2DModel,
+            # noise_pred = self.unet(latent_model_input, t).sample
+            
+            ### UNet2DConditionModel, 
+            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+
+            # perform guidance (high scale from paper!)
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            
+            
+            ### delta denoising score (modified) ----------------------------------------
+            ## (img2img)
+            t_step    = self.scheduler.timesteps[start]
+            d_latents = self.scheduler.add_noise(delta_latents, torch.randn_like(delta_latents), t_step)
+            d_latents = self.produce_latents(text_embeddings, latents=d_latents, start=start)
+            
+            # diffusing step
+            d_latents_noisy = self.scheduler.add_noise(d_latents, noise, t)
+            d_latents_model_input = torch.cat([d_latents_noisy] * 2)
+            
+            d_noise_pred = self.unet(d_latents_model_input, t, encoder_hidden_states=text_embeddings).sample
+            
+            d_noise_pred_uncond, d_noise_pred_text = d_noise_pred.chunk(2)
+            d_noise_pred = d_noise_pred_uncond + guidance_scale * (d_noise_pred_text - d_noise_pred_uncond)
+        
+        
+        ## w(t), alpha_t * sigma_t^2
+        # w = (1 - self.alphas[t])
+        w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
+        grad = w * (noise_pred - noise)
+        
+        grad_for_dds = w * (d_noise_pred - noise)
+        
+        # return loss # dummy loss value
+        return grad_for_dds - grad
+    
     def produce_latents(self, 
                         text_embeddings, 
                         height=512, 
@@ -348,8 +431,8 @@ class StableDiffusion(nn.Module):
         self.scheduler.set_timesteps(num_inference_steps)
 
         with torch.autocast('cuda'):
-            # for i, t in enumerate(self.scheduler.timesteps):
-            for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="DDIM Sample")):
+            for i, t in enumerate(self.scheduler.timesteps):
+            # for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="DDIM Sample")):
                 # skip ! :: this is index not timestep
                 if i <= start:
                     continue
@@ -374,90 +457,7 @@ class StableDiffusion(nn.Module):
                         
         return latents
     
-    def produce_latents_guide(self, 
-                              text_embeddings, 
-                              height=512, 
-                              width=512, 
-                              num_inference_steps=50, 
-                              guidance_scale=7.5, 
-                              latents=None, 
-                              start=0,
-                              # guide_latents=None, 
-                              guide_latents_list=None,
-                              uncond_embeddings_list=None,
-                              clip_model=None, 
-                              beta=1.6,
-                             ):
-
-        if latents is None:
-            latents = torch.randn((text_embeddings.shape[0] // 2, self.unet.in_channels, height // 8, width // 8), device=self.device)
-
-        self.scheduler.set_timesteps(num_inference_steps)
-        max_guidance_step = self.num_train_timesteps // 2
-
-        with torch.autocast('cuda'):
-            for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="DDIM Sample")):
-                # skip !
-                if i <= start:
-                    continue
-                    
-                # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
-                with torch.no_grad():
-                    latents_old = latents.clone()
-                    
-                latent_model_input = torch.cat([latents] * 2)
-
-                # predict the noise residual
-                with torch.no_grad():
-                    if uncond_embeddings_list != None:
-                        text_embeddings[0] = uncond_embeddings_list[i]
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)['sample']
-                
-                # perform guidance
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
-                
-                """
-                latent guidence using anti-gradient :: 
-                reference: Sketch-Guided Text-to-Image Diffusion Models
-                """
-                # if t >= max_guidance_step:
-
-#                 with torch.no_grad():
-#                     _latents = latents.clone()
-
-#                 _latents.requires_grad = True
-#                 ## convert 4 channel to 3 channel
-
-#                 #### instead of direct comparison w final latent, maybe it is better to use forward noise?
-#                 # guide_latents = guide_latents_list[i]
-#                 guide_latents = guide_latents_list[-1]
-#                 est_latents = torch.einsum('bi,abcd->aicd', self.linear_rgb_estimator, _latents) * 0.5 + 0.5
-#                 est_guide   = torch.einsum('bi,abcd->aicd', self.linear_rgb_estimator, guide_latents) * 0.5 + 0.5
-                
-#                 # loss = self.criterionL1(image_z_1, image_z_2) ## L1 dist
-#                 loss = self.img_clip_loss(clip_model, est_latents, est_guide) ## cos-sim
-                
-#                 loss.backward()
-#                 gradient = _latents.grad
-
-#                 # gradient = latents - guide_latents
-#                 # weight = self.criterionL2(latents_old, latents) / torch.norm(gradient) * beta ### paper
-#                 # weight = 1.0
-#                 # weight = (self.num_train_timesteps - t) / self.num_train_timesteps
-#                 # weight = 1.0
-#                 # weight = t / self.num_train_timesteps
-#                 weight = self.num_train_timesteps / (self.num_train_timesteps - t) * beta
-#                 # weight = self.num_train_timesteps
-#                 # import pdb;pdb.set_trace()
-
-
-#                 latents = latents - (gradient * weight)
-                
-        return latents
+    
 
     def decode_latents(self, latents):
         # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
