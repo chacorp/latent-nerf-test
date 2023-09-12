@@ -67,19 +67,23 @@ class Trainer:
         ### reference image
         self.ref_image, self.ref_image_tensor, self.ref_image_embeds, self.ref_sampled_texture = self.get_image()
         
+        self.diffusion.scheduler.set_timesteps(self.cfg.guide.num_inference_steps)
         with torch.no_grad():
-            ref_samp_tex_encode = self.diffusion.encode_imgs(self.ref_sampled_texture)
-            # ref_samp_tex_encode = F.interpolate(ref_samp_tex_encode, (128, 128), mode='bilinear')
-            # noise = torch.randn_like(ref_samp_tex_encode)
-            # ref_samp_tex_encode = (ref_samp_tex_encode + noise) * 0.5
+            latent_samp = self.diffusion.encode_imgs(self.ref_sampled_texture)
+            # latent_samp = F.interpolate(latent_samp, (128, 128), mode='bilinear')
             
-        ref_samp_tex_encode.requires_grad = True
-        self.mesh_model.texture_img = nn.Parameter(ref_samp_tex_encode)
+            ### set time step for latent sampling
+            noise = torch.randn_like(latent_samp)
+            # t_step    = self.diffusion.scheduler.timesteps[42]            
+            # latent_samp = self.diffusion.scheduler.add_noise(latent_samp, noise, t_step)
+            # latent_samp = (latent_samp + noise) * 0.5
+            
+        latent_samp.requires_grad = True
+        self.mesh_model.texture_img = nn.Parameter(latent_samp)
         self.mesh_model.texture_img_rgb_finetune = nn.Parameter(self.ref_sampled_texture)
         # self.mesh_model.texture_img = nn.Parameter(self.ref_sampled_texture)
         
-        ### set time step for latent sampling
-        self.diffusion.scheduler.set_timesteps(self.cfg.guide.num_inference_steps)
+        
         
         
         self.optimizer          = self.init_optimizer()
@@ -457,7 +461,7 @@ class Trainer:
                     # not pixelwise loss :: 'pred_rgbs' should be latent (4 channel)
                     # Randomly log rendered images throughout the training
                     # logger.info('view: theta={}, phi={}, radius={}'.format(data['theta'], data['phi'], data['radius']))
-                    self.log_train_renders(pred_rgbs)
+                    self.log_train_renders(pred_rgbs, data)
                     
         logger.info('Finished Training ^_^')
         logger.info('Evaluating the last model...')
@@ -559,16 +563,17 @@ class Trainer:
         return data
     
     def train_render_text(self, data: Dict[str, Any]):
-        thetas    = data['theta']
-        phis      = data['phi']
-        rs   = data['radius']
+        thetas  = data['theta']
+        phis    = data['phi']
+        rs      = data['radius']
+        is_body = data['is_body']
         
         # theta       = self.ref_pose['theta']
         # phi         = self.ref_pose['phi']
         # radius      = self.ref_pose['radius']
         
         ## randomly select view: body, head
-        is_body = np.random.uniform(0, 1) < 0.5
+        # is_body = np.random.uniform(0, 1) < 0.5 ### moved to ViewDataset
     
         ## render
         # outputs  = self.mesh_model.render(thetas, phis, rs, dims=(64, 64), is_body=is_body)
@@ -590,7 +595,6 @@ class Trainer:
             text_z = self.text_z[dirs] if is_body else self.text_z_H[dirs]
         else:
             text_z = self.text_z
-            
         
 #         latent_shading = pred_lighting*self.latent_bw_max + self.latent_b        
 #         latent = pred_rgb*pred_lighting + latent_shading        
@@ -607,23 +611,29 @@ class Trainer:
         # latent_I_.requires_grad = True
         # latent_N = self.diffusion.encode_imgs(pred_normal) * alpha + latent_I_ * (1 - alpha)
         """
-            TODO:
-            - [v] DDIM inversion
-            - [v] null-text inversion : get optimal 'text_z' (uncond_embeddings_list) - carefull with the guidance_scale
-            - [v] better initialization for texture ...? 
-                - invert image and sample image noise to texture space
-                - just encode sampled_texture from SamplerNet
-                
-            - [ ] add Jacobain optimization (ref:textdeformer)...?
-            - [ ] denoise with geometry constraint (follow 'pred_rgb')
+        Implemented
+            - [=] DDIM inversion
+            - [=] null-text inversion : get optimal 'text_z' (uncond_embeddings_list) - carefull with the guidance_scale
+        
+        Current
+            - [v] initial texture: sampled_texture from SamplerNet
+            - [v] model: Dreambooth (dreambooth_csh_01)
+            - [v] img2img -> img2img why good quality?
+            - [v] replaced SDS with modified DDS (img2img) 
+                -> not working
+                -> why?
+        TODO:
+            - add Jacobain optimization (ref:textdeformer)...?
+            - denoise with geometry constraint (follow 'pred_rgb')
                 - RGB/normal -> [Enc] -> latent -> [diffuse] -> SDS : does not work... (ref: TADA!)
                 - and lighting
                 
-            - [v] import Dreambooth checkpoint
-            - [v] SDedit .... why good quality?
-                - > use it for delta denosing score?
-            + upgrade diffusers > 0.17.0
+            + upgrade diffusers==0.17.0 (>=0.17.0) - for ControlNet
             + how about image loss?
+            + [SD26] DDS = (grad_for_dds - grad) -> color shift, color saturation explode
+            + [SD27] DDS = (grad - grad_for_dds) -> blurry, converging to average?
+            + [SD28] latents_L2 (sampTex + noised)
+            + [SD29] latents_L2 (sampTex) 
         """
         ## even: uncond, odd:cond
         # torch.stack(torch.arange(12).chunk(6))
@@ -641,37 +651,28 @@ class Trainer:
         
         
         #### SDedit ....??? why good result?
-        # latent_RGB = self.diffusion.encode_imgs(outputs_RGB['image'])
-        # latent_RGB = self.diffusion.encode_imgs(outputs_RGB['image']*outputs_RGB['lighting'])
+        latents_RGB = self.diffusion.encode_imgs(outputs_RGB['image'])
+        # latents_RGB = self.diffusion.encode_imgs(outputs_RGB['image']*outputs_RGB['lighting'])
         
         # import pdb;pdb.set_trace()
-        # start  = 40
-        # t_step = self.diffusion.scheduler.timesteps[start]
-        # noise  = torch.randn_like(pred_rgb)
+        start  = 40
+        t_step = self.diffusion.scheduler.timesteps[start]
+        noise  = torch.randn_like(pred_rgb)
         
-        # latent_RGB_n = self.diffusion.scheduler.add_noise(latent_RGB, noise, t_step)
-        # latent_RGB_n_ = self.diffusion.produce_latents(text_z[0], latents=latent_RGB_n, start=start)
-        # Image.fromarray(tensor2numpy(self.diffusion.decode_latents(latent_RGB_n_).permute(0, 2, 3, 1)[0])).save('t.png')
+        latents_RGB_n = self.diffusion.scheduler.add_noise(latents_RGB, noise, t_step)
+        latents_RGB_n_= self.diffusion.produce_latents(text_z[0], latents=latents_RGB_n, start=start)
+        # import pdb;pdb.set_trace()
+        # Image.fromarray(tensor2numpy(self.diffusion.decode_latents(latents_RGB_n_).permute(0, 2, 3, 1)[0]*outputs_RGB['mask'].permute(0, 2, 3, 1)[0])).save('t.png')
         
+        L2_loss = self.criterionL2(latents_RGB_n_*pred_rgb_mask, pred_rgb*pred_rgb_mask)
+        L2_loss.backward(retain_graph=True)
         
         # latent_I_n = self.diffusion.scheduler.add_noise(pred_rgb, noise, t_step)
         # latent_I_n_ = self.diffusion.produce_latents(text_z[0], latents=latent_I_n, start=start)
         # Image.fromarray(tensor2numpy(self.diffusion.decode_latents(latent_I_n_).permute(0, 2, 3, 1)[0])).save('t.png')
         
-        # Image.fromarray(tensor2numpy(self.diffusion.decode_latents(pred_rgb).permute(0, 2, 3, 1)[0])).save('t.png')
-        # Image.fromarray(self.diffusion.embeds_to_img(text_z[0], latents=latent_RGB_n_, start=start)[0]).save('t.png')
-                
-        # Image.fromarray(tensor2numpy(outputs_RGB['image'].permute(0,2,3,1)[0])).save('t.png')
-        # Image.fromarray(tensor2numpy(pred_rgb.permute(0,2,3,1)[0])).save('t.png')
         
-        # Image.fromarray(tensor2numpy(self.diffusion.decode_latents(latent_I).permute(0, 2, 3, 1)[0])).save('t.png')
-        
-        # latents = self.diffusion.produce_latents(text_z[0], latents=pred_rgb, start=40)
-        # Image.fromarray(tensor2numpy(self.diffusion.decode_latents(latents).permute(0, 2, 3, 1)[0])).save('t.png')
-
-        I_grad = self.diffusion.train_step_delta(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), outputs['image'], outputs_RGB['image'])
-        # I_grad = self.diffusion.train_step(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), latent_I)
-        
+        # I_grad = self.diffusion.train_step(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), latent_I)        
         # N_grad = self.diffusion.train_step(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), latent_N)
         # https://github.com/threestudio-project/threestudio/blob/8a51c37317b6f7cd74bb3cb24c975b56d0a96703/threestudio/models/guidance/stable_diffusion_guidance.py#L427C9-L427C18
         # tex_loss = self.criterionL2((latent_I-I_grad), I_grad)
@@ -684,14 +685,15 @@ class Trainer:
         # pred_rgb.backward(gradient=I_grad_up, retain_graph=True)
         # pred_normal.backward(gradient=N_grad_up)
         
-        outputs['image'].backward(gradient=I_grad)
-        
+        # latent_I.backward(gradient=I_grad)        
         # latent_N.backward(gradient=N_grad, retain_graph=True)
         # return pred_rgb, lap_loss, loss_guidance
         
         # I_grad = self.diffusion.train_step(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), pred_rgb)
         # I_grad = self.diffusion.train_step(text_z[0], pred_rgb, guidance_scale=7.5)
         # I_grad = self.diffusion.train_step(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), latent, guidance_scale=7.5)
+        
+        # I_grad = self.diffusion.train_step(text_z.permute(1, 0, 2, 3).reshape(-1, 77, 768), pred_rgb)
         # pred_rgb.backward(gradient=I_grad*pred_rgb_mask)
         
         return pred_rgb, lap_loss, torch.zeros([1]).to(self.device)
@@ -711,14 +713,24 @@ class Trainer:
 
         return pred_rgb, texture_rgb
 
-    def log_train_renders(self, preds: torch.Tensor):
+    def log_train_renders(self, preds, data):
+        thetas  = data['theta']
+        phis    = data['phi']
+        rs      = data['radius']
+        is_body = data['is_body']
+        
         if self.mesh_model.latent_mode: ## rendered image = latent
         # if False: ## rendered image = RGB
-            pred_rgb = self.diffusion.decode_latents(preds).permute(0, 2, 3, 1).contiguous()  # [1, 3, H, W]
+            # pred_rgb = self.diffusion.decode_latents(preds).permute(0, 2, 3, 1).contiguous()  # [1, 3, H, W]            
+            pred_rgb = self.diffusion.decode_latents(self.mesh_model.texture_img).permute(0, 2, 3, 1).contiguous()  # [1, 3, H, W]
             if not self.cfg.optim.use_SD:
-                pred_rgb = self.diffusion.denorm_img(pred_rgb)
+                # pred_rgb = self.diffusion.denorm_img(pred_rgb)
+                pred_rgb = self.diffusion.denorm_img(self.mesh_model.texture_img)
         else:
-            pred_rgb = preds.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
+            # pred_rgb = preds.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
+            pred_rgb = self.mesh_model.texture_img.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
+            
+        pred_rgb = self.mesh_model.render_RGB(theta, phi, radius, pred_rgb, dims=(dim,dim))
         
         save_path = self.train_renders_path / f'step_{self.train_step:05d}.png'
         # save_path = self.train_renders_path / f'step_{log_idx:05d}.jpg'
