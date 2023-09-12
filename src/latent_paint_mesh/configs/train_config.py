@@ -8,16 +8,17 @@ from loguru import logger
 class RenderConfig:
     """ Parameters for the Mesh Renderer """
     # Render height,width for training
-    # train_grid_size: int = 64
-    train_grid_size: int = 256
+    train_grid_size: int = 64
+    # train_grid_size: int = 512
     # Render height,width for evaluation
     eval_grid_size:  int = 512
     # training camera radius range
     # radius_range: Tuple[float, float] = (1.45, 1.75)
     # radius_range: Tuple[float, float] = (1.0, 1.2)
     radius_range: Tuple[float, float] = (1.4, 2.4)
-    thetas_range: Tuple[float, float] = (60, 110)
-    # Set [0,angle_overhead] as the overhead region
+    thetas_range: Tuple[float, float] = ( 60, 110)
+    phi_range:    Tuple[float, float] = (225, 225+270)
+    # Set [0, angle_overhead] as the overhead region
     angle_overhead: float = 40
     # Define the front angle region
     angle_front: float = 70
@@ -42,12 +43,15 @@ class GuideConfig:
     # A Textual-Inversion concept to use
     concept_name: Optional[str] = None
     # A huggingface diffusion model to use
+    paint_by_example = '/source/kseo/huggingface_cache/models--Fantasy-Studio--Paint-by-Example/snapshots/351e6427d8c28a3b24f7c751d43eb4b6735127f7'
     # diffusion_name: str = 'CompVis/stable-diffusion-v1-4'
     # diffusion_name: str = 'runwayml/stable-diffusion-v1-5'
-    diffusion_name: str = '/source/kseo/hugging_cache/models--runwayml--stable-diffusion-v1-5/snapshots/39593d5650112b4cc580433f6b0435385882d819'
+    # diffusion_name: str = '/source/kseo/hugging_cache/models--runwayml--stable-diffusion-v1-5/snapshots/39593d5650112b4cc580433f6b0435385882d819'
     # diffusion_name: str = '/source/kseo/huggingface_cache/models--runwayml--stable-diffusion-v1-5/snapshots/aa9ba505e1973ae5cd05f5aedd345178f52f8e6a'
-    guidance_scale: float = 7.5
+    diffusion_name = "/source/kseo/huggingface_cache/dreambooth_csh_01"
     
+    guidance_scale: float = 7.5
+    num_inference_steps: int = 50
     # Scale of mesh in 1x1x1 cube
     shape_scale: float = 1.0
     # height of mesh
@@ -57,7 +61,7 @@ class GuideConfig:
     # texture image resolution
     texture_resolution=128
     # texture mapping interpolation mode from texture image, options: 'nearest', 'bilinear', 'bicubic'
-    texture_interpolation_mode: str= 'nearest'
+    texture_interpolation_mode: str= 'bilinear'
 
 
 @dataclass
@@ -89,10 +93,10 @@ class OptimConfig:
     
     
     ## Texture Learning rate
-    # lr: float = 1e-3
+    lr: float = 1e-2 ## origianl
+    # lr: float = 5e-3
     # lr: float = 2e-3
-    # lr: float = 2e-2
-    lr: float = 1e-2
+    # lr: float = 2e-2    
     # lr: float = 15e-3
     ## Displacement
     # ref: https://github.com/bharat-b7/LoopReg/blob/ab349cc0e1a7ac534581bd7a9e30e08ce10e7696/fit_SMPLD.py#L57
