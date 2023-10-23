@@ -9,7 +9,7 @@ class Renderer:
                  device, 
                  dim=(224, 224), 
                  interpolation_mode='nearest',
-                 lights=torch.tensor([1.0, 1.0, 1.0, 
+                 lights=torch.tensor([1.0, 0.0, 1.0, 
                                       1.0, 0.0, 0.0, 
                                       0.0, 0.0, 0.0]),
                  ):
@@ -233,14 +233,16 @@ class Renderer:
             face_vertices_camera[:, :, :, -1],
             face_vertices_image,
             face_features,
-            face_normals[:, :, -1],
+            # face_normals[:, :, -1],
+            abs(face_normals[:, :, -1]),
             rast_backend='cuda'
         )
             
         # image_features is a tuple in composed of the interpolated attributes of face_attributes
         texture_coords, mask, world_normals = image_features
         image = kal.render.mesh.texture_mapping(texture_coords, texture_map.repeat(B, 1, 1, 1), mode='bilinear')
-        image = image * mask
+        # image = image * mask ###  mask? softmask??
+        
         
         ## Lighting
         # https://github.com/threedle/text2mesh/blob/37d1c8491104b78ee55cd54cd09ab24cb1427714/render.py#L278
