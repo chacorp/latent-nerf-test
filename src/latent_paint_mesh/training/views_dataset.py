@@ -22,6 +22,9 @@ def rand_poses(size,
     radius = torch.rand(size, device=device) * (radius_range[1] - radius_range[0]) + radius_range[0]
     thetas = torch.rand(size, device=device) * (theta_range[1] - theta_range[0]) + theta_range[0]
     phis   = torch.rand(size, device=device) * (phi_range[1] - phi_range[0]) + phi_range[0]
+    
+    thetas = thetas % (2*np.pi)
+    phis = phis % (2*np.pi)
     # import pdb;pdb.set_trace()
     dirs = get_view_direction(thetas, phis, angle_overhead, angle_front)
 
@@ -62,6 +65,7 @@ class ViewsDataset:
                                                     self.device, 
                                                     radius_range     = self.cfg.radius_range,
                                                     theta_range      = self.cfg.thetas_range, 
+                                                    phi_range        = self.cfg.phi_range, 
                                                     angle_overhead   = self.cfg.angle_overhead,
                                                     angle_front      = self.cfg.angle_front)
 
@@ -75,11 +79,15 @@ class ViewsDataset:
                                                       angle_overhead = self.cfg.angle_overhead,
                                                       angle_front    = self.cfg.angle_front)
 
+        ## randomly select view: body, head
+        is_body = np.random.uniform(0, 1) < 0.5
+        
         data = {
             'dir': dirs,
             'theta': thetas,
             'phi': phis,
-            'radius': radius
+            'radius': radius,
+            'is_body': is_body,
         }
 
         return data
