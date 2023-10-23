@@ -152,7 +152,11 @@ class TexturedMeshModel(nn.Module):
 
     def get_params(self):
         if self.latent_mode:
-            return [self.background_sphere_colors, self.texture_img]
+            if self.opt.optim.mode == 0:
+                return [self.background_sphere_colors, self.texture_img]
+            else:
+                return [self.background_sphere_colors, self.texture_img, self.texture_img_rgb_finetune]
+            
         else:
             return [self.background_sphere_colors, self.texture_img_rgb_finetune]
 
@@ -410,4 +414,7 @@ class TexturedMeshModel(nn.Module):
                                                                        disp=displacement,
                                                                        is_body=is_body,
                                                                     )
-        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'normal': normal, 'lighting': lighting}
+        
+        lap_loss = self.L.mm(self.mesh.vertices+displacement)
+        lap_loss = torch.mean(torch.sum((lap_loss - self.init_lap)**2)) ## L2 loss
+        return {'image': pred_features, 'texture_map': texture_img, 'mask': mask, 'lap_loss': lap_loss, 'normal': normal, 'lighting': lighting}
