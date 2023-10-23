@@ -17,7 +17,10 @@ class RenderConfig:
     # radius_range: Tuple[float, float] = (1.0, 1.2)
     radius_range: Tuple[float, float] = (1.4, 2.4)
     thetas_range: Tuple[float, float] = ( 60, 110)
-    phi_range:    Tuple[float, float] = (225, 225+270)
+    # phi_range:    Tuple[float, float] = (225, 225+270)
+    # phi_range:    Tuple[float, float] = (200, 360+160)
+    phi_range:    Tuple[float, float] = (0, 360)
+    
     # Set [0, angle_overhead] as the overhead region
     angle_overhead: float = 40
     # Define the front angle region
@@ -48,7 +51,7 @@ class GuideConfig:
     # diffusion_name: str = 'runwayml/stable-diffusion-v1-5'
     # diffusion_name: str = '/source/kseo/hugging_cache/models--runwayml--stable-diffusion-v1-5/snapshots/39593d5650112b4cc580433f6b0435385882d819'
     # diffusion_name: str = '/source/kseo/huggingface_cache/models--runwayml--stable-diffusion-v1-5/snapshots/aa9ba505e1973ae5cd05f5aedd345178f52f8e6a'
-    diffusion_name = "/source/kseo/huggingface_cache/dreambooth_csh_01"
+    diffusion_name = "/source/kseo/huggingface_cache/dreambooth_csh_02"
     
     guidance_scale: float = 7.5
     num_inference_steps: int = 50
@@ -93,9 +96,9 @@ class OptimConfig:
     
     
     ## Texture Learning rate
-    lr: float = 1e-2 ## origianl
+    # lr: float = 1e-2 ## origianl
     # lr: float = 5e-3
-    # lr: float = 2e-3
+    lr: float = 5e-3
     # lr: float = 2e-2    
     # lr: float = 15e-3
     ## Displacement
@@ -109,7 +112,9 @@ class OptimConfig:
     reg_weight: float = 10.
     # lap_weight: float = 1.
     # reg_weight: float = 1.
-
+    
+    # 0:latent-Paint, 1: TADA!, 2: SDEdit
+    mode: int= 0
 
 @dataclass
 class LogConfig:
